@@ -1591,7 +1591,7 @@ class _Footer extends StatelessWidget {
             const SizedBox(height: 20),
             GestureDetector(
               onTap: () async {
-                final uri = Uri.parse('https://app.taploop.com.mx');
+                final uri = Uri.parse('https://liomont.taploop.com.mx');
                 await _launchPublicUri(uri);
               },
               child: Row(
@@ -2504,7 +2504,7 @@ class _NotFoundPage extends StatelessWidget {
               const SizedBox(height: 32),
               GestureDetector(
                 onTap: () async {
-                  final uri = Uri.parse('https://app.taploop.com.mx');
+                  final uri = Uri.parse('https://liomont.taploop.com.mx');
                   await _launchPublicUri(uri);
                 },
                 child: Text(

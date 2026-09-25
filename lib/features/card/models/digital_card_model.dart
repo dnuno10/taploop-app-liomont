@@ -240,7 +240,7 @@ class DigitalCardModel {
     'show_verified_badge': showVerifiedBadge,
   };
 
-  String get publicUrl => 'https://app.taploop.com.mx/$publicSlug';
+  String get publicUrl => 'https://liomont.taploop.com.mx/$publicSlug';
 
   DigitalCardModel copyWith({
     String? id,

@@ -1572,8 +1572,8 @@ class _LivePreviewPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final slug = card.publicSlug.trim();
     final publicPath = slug.isEmpty
-        ? 'app.taploop.com.mx'
-        : 'app.taploop.com.mx/$slug';
+        ? 'liomont.taploop.com.mx'
+        : 'liomont.taploop.com.mx/$slug';
     final publicUrl = 'https://$publicPath';
 
     return Container(
