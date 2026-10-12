@@ -181,6 +181,8 @@ class _ShareCardViewState extends State<ShareCardView> {
                         const SizedBox(width: 8),
                         TapLoopButton(
                           label: 'Guardar',
+                          width: 120,
+                          height: 44,
                           onPressed: () async {
                             final candidate = controller.text
                                 .trim()
