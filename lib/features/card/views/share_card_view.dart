@@ -129,89 +129,94 @@ class _ShareCardViewState extends State<ShareCardView> {
               borderRadius: BorderRadius.circular(16),
             ),
             backgroundColor: ctx.bgCard,
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Enlace público',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      color: ctx.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    'liomont.taploop.com.mx/',
-                    style: GoogleFonts.dmSans(
-                      fontSize: 13,
-                      color: ctx.textSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TapLoopTextField(
-                    label: 'Enlace',
-                    controller: controller,
-                    hint: 'tu-nombre',
-                    autofocus: true,
-                  ),
-                  if (errorText != null) ...[
-                    const SizedBox(height: 8),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Text(
-                      errorText!,
-                      style: GoogleFonts.dmSans(
-                        fontSize: 12,
-                        color: AppColors.error,
+                      'Enlace público',
+                      style: GoogleFonts.outfit(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: ctx.textPrimary,
                       ),
                     ),
-                  ],
-                  const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(ctx),
-                        child: const Text('Cancelar'),
+                    const SizedBox(height: 6),
+                    Text(
+                      'liomont.taploop.com.mx/',
+                      style: GoogleFonts.dmSans(
+                        fontSize: 13,
+                        color: ctx.textSecondary,
                       ),
-                      const SizedBox(width: 8),
-                      TapLoopButton(
-                        label: 'Guardar',
-                        onPressed: () async {
-                          final candidate = controller.text
-                              .trim()
-                              .toLowerCase();
-                          if (!CardRepository.slugPattern.hasMatch(candidate)) {
-                            setDialogState(() {
-                              errorText =
-                                  'Usa solo letras minúsculas, números y guiones (ej. juan-perez).';
-                            });
-                            return;
-                          }
-                          if (candidate == card.publicSlug) {
-                            Navigator.pop(ctx);
-                            return;
-                          }
-                          final available =
-                              await CardRepository.isSlugAvailable(
-                                candidate,
-                                excludingCardId: card.id,
-                              );
-                          if (!ctx.mounted) return;
-                          if (!available) {
-                            setDialogState(() {
-                              errorText = 'Ese enlace ya está en uso.';
-                            });
-                            return;
-                          }
-                          Navigator.pop(ctx, candidate);
-                        },
+                    ),
+                    const SizedBox(height: 12),
+                    TapLoopTextField(
+                      label: 'Enlace',
+                      controller: controller,
+                      hint: 'tu-nombre',
+                      autofocus: true,
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        errorText!,
+                        style: GoogleFonts.dmSans(
+                          fontSize: 12,
+                          color: AppColors.error,
+                        ),
                       ),
                     ],
-                  ),
-                ],
+                    const SizedBox(height: 20),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Cancelar'),
+                        ),
+                        const SizedBox(width: 8),
+                        TapLoopButton(
+                          label: 'Guardar',
+                          onPressed: () async {
+                            final candidate = controller.text
+                                .trim()
+                                .toLowerCase();
+                            if (!CardRepository.slugPattern.hasMatch(
+                              candidate,
+                            )) {
+                              setDialogState(() {
+                                errorText =
+                                    'Usa solo letras minúsculas, números y guiones (ej. juan-perez).';
+                              });
+                              return;
+                            }
+                            if (candidate == card.publicSlug) {
+                              Navigator.pop(ctx);
+                              return;
+                            }
+                            final available =
+                                await CardRepository.isSlugAvailable(
+                                  candidate,
+                                  excludingCardId: card.id,
+                                );
+                            if (!ctx.mounted) return;
+                            if (!available) {
+                              setDialogState(() {
+                                errorText = 'Ese enlace ya está en uso.';
+                              });
+                              return;
+                            }
+                            Navigator.pop(ctx, candidate);
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           );
