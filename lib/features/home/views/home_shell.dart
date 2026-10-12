@@ -114,16 +114,26 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  List<Widget> get _views => [
-    DashboardView(onNavigate: (i) => setState(() => _index = i)),
-    const EditCardView(),
-    const ShareCardView(),
-    const AnalyticsDashboardView(),
-    const LeadIntelligenceView(),
-    const TeamPerformanceView(),
-    const AdminView(),
-    const SettingsView(),
-  ];
+  // Index 6 (AdminView) is only kept for users with an admin-level role.
+  // _navItems below must stay filtered in sync with this, index-for-index.
+  static const int _adminViewIndex = 6;
+
+  List<Widget> get _views {
+    final views = [
+      DashboardView(onNavigate: (i) => setState(() => _index = i)),
+      const EditCardView(),
+      const ShareCardView(),
+      const AnalyticsDashboardView(),
+      const LeadIntelligenceView(),
+      const TeamPerformanceView(),
+      const AdminView(),
+      const SettingsView(),
+    ];
+    if (appState.currentUser?.isAdmin != true) {
+      views.removeAt(_adminViewIndex);
+    }
+    return views;
+  }
 
   Future<void> _setVerifiedBadge(bool value) async {
     final card = appState.currentCard;
@@ -152,48 +162,54 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  static const _navItems = [
-    _NavItem(
-      icon: Icons.home_rounded,
-      activeIcon: Icons.home_rounded,
-      label: 'Inicio',
-    ),
-    _NavItem(
-      icon: Icons.badge_outlined,
-      activeIcon: Icons.badge_rounded,
-      label: 'Perfil digital',
-    ),
-    _NavItem(
-      icon: Icons.share_outlined,
-      activeIcon: Icons.share_rounded,
-      label: 'Compartir',
-    ),
-    _NavItem(
-      icon: Icons.query_stats_outlined,
-      activeIcon: Icons.query_stats_rounded,
-      label: 'Analíticas',
-    ),
-    _NavItem(
-      icon: Icons.assignment_ind_outlined,
-      activeIcon: Icons.assignment_ind_rounded,
-      label: 'Leads',
-    ),
-    _NavItem(
-      icon: Icons.groups_outlined,
-      activeIcon: Icons.groups_rounded,
-      label: 'Equipo',
-    ),
-    _NavItem(
-      icon: Icons.admin_panel_settings_outlined,
-      activeIcon: Icons.admin_panel_settings_rounded,
-      label: 'Administración',
-    ),
-    _NavItem(
-      icon: Icons.settings_outlined,
-      activeIcon: Icons.settings_rounded,
-      label: 'Configuración',
-    ),
-  ];
+  static List<_NavItem> get _navItems {
+    final items = [
+      const _NavItem(
+        icon: Icons.home_rounded,
+        activeIcon: Icons.home_rounded,
+        label: 'Inicio',
+      ),
+      const _NavItem(
+        icon: Icons.badge_outlined,
+        activeIcon: Icons.badge_rounded,
+        label: 'Perfil digital',
+      ),
+      const _NavItem(
+        icon: Icons.share_outlined,
+        activeIcon: Icons.share_rounded,
+        label: 'Compartir',
+      ),
+      const _NavItem(
+        icon: Icons.query_stats_outlined,
+        activeIcon: Icons.query_stats_rounded,
+        label: 'Analíticas',
+      ),
+      const _NavItem(
+        icon: Icons.assignment_ind_outlined,
+        activeIcon: Icons.assignment_ind_rounded,
+        label: 'Leads',
+      ),
+      const _NavItem(
+        icon: Icons.groups_outlined,
+        activeIcon: Icons.groups_rounded,
+        label: 'Equipo',
+      ),
+      const _NavItem(
+        icon: Icons.admin_panel_settings_outlined,
+        activeIcon: Icons.admin_panel_settings_rounded,
+        label: 'Administración',
+      ),
+      const _NavItem(
+        icon: Icons.settings_outlined,
+        activeIcon: Icons.settings_rounded,
+        label: 'Configuración',
+      ),
+    ];
+    if (appState.currentUser?.isAdmin != true) {
+      items.removeAt(_adminViewIndex);
+    }
+    return items;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -202,6 +218,12 @@ class _HomeShellState extends State<HomeShell> {
       builder: (context, _) {
         final isDesktop = Responsive.isDesktop(context);
         final views = _views;
+        // If the role changes (or on an edge-case first frame) and _index
+        // still points at a tab that got filtered out, fall back to the
+        // last valid tab instead of indexing out of range.
+        final effectiveIndex = views.isEmpty
+            ? 0
+            : _index.clamp(0, views.length - 1);
         final loadingInitialCard =
             appState.loadingCard && appState.currentCard == null;
 
@@ -211,7 +233,7 @@ class _HomeShellState extends State<HomeShell> {
 
         if (isDesktop) {
           return _DesktopShell(
-            index: _index,
+            index: effectiveIndex,
             views: views,
             cards: appState.userCards,
             currentCard: appState.currentCard,
@@ -222,7 +244,7 @@ class _HomeShellState extends State<HomeShell> {
         }
 
         return _MobileShell(
-          index: _index,
+          index: effectiveIndex,
           views: views,
           cards: appState.userCards,
           currentCard: appState.currentCard,
@@ -320,6 +342,8 @@ class _DesktopShell extends StatelessWidget {
                       initials: user?.initials ?? 'TL',
                       photoUrl: profilePhotoUrl,
                     ),
+                    const SizedBox(height: 18),
+                    const _CorporateAccessBadge(),
                   ],
                 ),
               ),
@@ -358,6 +382,34 @@ class _DesktopShell extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _CorporateAccessBadge extends StatelessWidget {
+  const _CorporateAccessBadge();
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'ACCESO CORPORATIVO',
+          style: TextStyle(
+            fontSize: 10,
+            letterSpacing: 1.4,
+            fontWeight: FontWeight.w600,
+            color: context.textSecondary,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Image.asset(
+          'assets/images/liomont.png',
+          height: 16,
+          fit: BoxFit.contain,
+        ),
+      ],
     );
   }
 }
@@ -708,6 +760,28 @@ class _MobileShell extends StatelessWidget {
             clipBehavior: Clip.hardEdge,
             child: Column(
               children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 14, 18, 2),
+                  child: Row(
+                    children: [
+                      Text(
+                        'ACCESO CORPORATIVO',
+                        style: TextStyle(
+                          fontSize: 9,
+                          letterSpacing: 1.2,
+                          fontWeight: FontWeight.w600,
+                          color: context.textSecondary,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Image.asset(
+                        'assets/images/liomont.png',
+                        height: 12,
+                        fit: BoxFit.contain,
+                      ),
+                    ],
+                  ),
+                ),
                 if (cards.isNotEmpty)
                   _MobileCardToolbar(
                     cards: cards,

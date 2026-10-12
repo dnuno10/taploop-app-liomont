@@ -9,6 +9,7 @@ import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/admin_repository.dart';
 import '../../../core/data/repositories/lead_repository.dart';
 import '../../../core/services/metrics_realtime_service.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../../core/widgets/taploop_toast.dart';
 import '../models/lead_model.dart';
@@ -391,8 +392,10 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        'Bandeja de leads',
+                      HelpTitle(
+                        title: 'Bandeja de leads',
+                        helpText:
+                            'Administra, filtra y prioriza los leads capturados por tus tarjetas.',
                         style: GoogleFonts.outfit(
                           fontSize: isDesktop ? 42 : 30,
                           fontWeight: FontWeight.w800,
@@ -1021,8 +1024,10 @@ class _LeadDetailPanelState extends State<_LeadDetailPanel> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      lead.displayName,
+                    HelpTitle(
+                      title: lead.displayName,
+                      helpText:
+                          'Resumen del lead seleccionado y sus datos principales.',
                       style: GoogleFonts.outfit(
                         fontSize: 22,
                         fontWeight: FontWeight.w800,
@@ -1231,8 +1236,9 @@ class _LeadActivityColumn extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Actividad reciente',
+        HelpTitle(
+          title: 'Actividad reciente',
+          helpText: 'Secuencia de eventos e interacciones de este lead.',
           style: GoogleFonts.outfit(
             fontSize: 16,
             fontWeight: FontWeight.w800,
@@ -1288,8 +1294,10 @@ class _LeadInfoPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Información del lead',
+          HelpTitle(
+            title: 'Información del lead',
+            helpText:
+                'Datos de contacto, estado y detalles capturados del lead.',
             style: GoogleFonts.outfit(
               fontSize: 15,
               fontWeight: FontWeight.w800,

@@ -91,10 +91,22 @@ class MetricsRealtimeSubscription {
     );
 
     subscription
+      // visit_events, contact_items, social_links and lead_actions have no
+      // org_id column of their own (only card_id/lead_id), so they can't be
+      // filtered server-side by org without risking missed events for cards
+      // created after this subscription starts. `leads` does have org_id,
+      // so filter that one the same way as users/digital_cards below.
       .._watchTable(table: 'visit_events')
       .._watchTable(table: 'contact_items')
       .._watchTable(table: 'social_links')
-      .._watchTable(table: 'leads')
+      .._watchTable(
+        table: 'leads',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'org_id',
+          value: orgId,
+        ),
+      )
       .._watchTable(table: 'lead_actions')
       .._watchTable(
         table: 'users',
@@ -129,7 +141,10 @@ class MetricsRealtimeSubscription {
 
   void _subscribe() {
     _channel.subscribe();
-    _scheduleRefresh();
+    // No initial _scheduleRefresh() here: every caller already does its own
+    // explicit load in initState() right alongside creating this
+    // subscription, so an automatic refresh ~450-500ms later was just a
+    // second, redundant fetch of the same data on every screen mount.
     _pollTimer = Timer.periodic(pollInterval, (_) => _scheduleRefresh());
   }
 

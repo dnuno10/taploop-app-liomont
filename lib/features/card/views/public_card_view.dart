@@ -15,6 +15,7 @@ import '../../../core/services/auth_service.dart';
 import '../../../core/utils/visitor_info.dart';
 import '../../../core/widgets/native_web_image.dart';
 import '../../../core/widgets/platform_icon.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../../core/widgets/taploop_toast.dart';
 import '../models/digital_card_model.dart';
@@ -51,7 +52,15 @@ class _PublicCardViewState extends State<PublicCardView> {
   DigitalCardModel? _card;
   bool _loading = true;
   bool _notFound = false;
+  // A network/Postgrest exception was thrown (e.g. the phone's connection
+  // was still waking up after the page sat idle overnight) — distinct from
+  // _notFound, which only means the query succeeded and returned no row.
+  bool _loadFailed = false;
   String? _errorDetail;
+  // True until we know whether the org has a logo, so the header can
+  // reserve the logo's slot from the very first frame instead of the logo
+  // popping in later and pushing the rest of the header down.
+  bool _logoPending = true;
   // NFC-specific
   _NfcState _nfcState = _NfcState.loading;
   bool _activating = false;
@@ -66,8 +75,14 @@ class _PublicCardViewState extends State<PublicCardView> {
   }
 
   Future<void> _hydrateOrganizationLogo(DigitalCardModel? card) async {
-    if (card == null) return;
-    if (card.companyLogoUrl?.trim().isNotEmpty == true) return;
+    if (card == null) {
+      if (mounted) setState(() => _logoPending = false);
+      return;
+    }
+    if (card.companyLogoUrl?.trim().isNotEmpty == true) {
+      if (mounted) setState(() => _logoPending = false);
+      return;
+    }
     final directOrgId = card.orgId?.trim();
     final orgId = directOrgId?.isNotEmpty == true
         ? directOrgId
@@ -75,14 +90,52 @@ class _PublicCardViewState extends State<PublicCardView> {
             'org_id': card.orgId,
             'user_id': card.userId,
           });
-    if (orgId == null || orgId.isEmpty) return;
+    if (!mounted || _card?.id != card.id) return;
+    if (orgId == null || orgId.isEmpty) {
+      setState(() => _logoPending = false);
+      return;
+    }
     final orgLogoUrl = await CardRepository.fetchOrganizationLogoUrl(orgId);
     if (!mounted || _card?.id != card.id) return;
-    if (orgLogoUrl == null || orgLogoUrl.isEmpty) return;
-    if (_card?.companyLogoUrl == orgLogoUrl) return;
     setState(() {
-      _card = _card?.copyWith(companyLogoUrl: orgLogoUrl);
+      _logoPending = false;
+      if (orgLogoUrl != null &&
+          orgLogoUrl.isNotEmpty &&
+          _card?.companyLogoUrl != orgLogoUrl) {
+        _card = _card?.copyWith(companyLogoUrl: orgLogoUrl);
+      }
     });
+  }
+
+  /// Retries transient failures (e.g. the phone's connection still waking
+  /// up after this page sat idle/backgrounded overnight) a couple of times
+  /// before giving up, instead of surfacing a network blip as "card not
+  /// found" on the very first attempt.
+  Future<T> _fetchWithRetry<T>(
+    Future<T> Function() request, {
+    int retries = 2,
+    Duration initialDelay = const Duration(milliseconds: 500),
+  }) async {
+    var delay = initialDelay;
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await request();
+      } catch (error) {
+        if (attempt >= retries) rethrow;
+        await Future.delayed(delay);
+        delay *= 2;
+      }
+    }
+  }
+
+  void _retryLoad() {
+    setState(() {
+      _loading = true;
+      _loadFailed = false;
+      _notFound = false;
+      _errorDetail = null;
+    });
+    _load();
   }
 
   Future<void> _load() async {
@@ -92,14 +145,18 @@ class _PublicCardViewState extends State<PublicCardView> {
       } else {
         DigitalCardModel? card;
         if (widget.userId != null) {
-          card = await CardRepository.fetchByUserId(
-            widget.userId!,
-            includeOrganizationLogo: false,
+          card = await _fetchWithRetry(
+            () => CardRepository.fetchByUserId(
+              widget.userId!,
+              includeOrganizationLogo: false,
+            ),
           );
         } else {
-          card = await CardRepository.fetchBySlug(
-            widget.slug!,
-            includeOrganizationLogo: false,
+          card = await _fetchWithRetry(
+            () => CardRepository.fetchBySlug(
+              widget.slug!,
+              includeOrganizationLogo: false,
+            ),
           );
         }
         if (mounted) {
@@ -107,6 +164,7 @@ class _PublicCardViewState extends State<PublicCardView> {
             _card = card;
             _notFound = card == null;
             _loading = false;
+            _logoPending = true;
           });
         }
         if (card != null && card.isActive) {
@@ -119,7 +177,7 @@ class _PublicCardViewState extends State<PublicCardView> {
       if (mounted) {
         setState(() {
           _loading = false;
-          _notFound = true;
+          _loadFailed = true;
           _errorDetail = e.toString();
         });
       }
@@ -127,16 +185,21 @@ class _PublicCardViewState extends State<PublicCardView> {
   }
 
   Future<void> _loadNfc() async {
-    final status = await CardRepository.checkNfcSerial(widget.nfcSerial!);
+    final resolved = await _fetchWithRetry(
+      () => CardRepository.resolveNfcSerial(
+        widget.nfcSerial!,
+        includeOrganizationLogo: false,
+      ),
+    );
     if (!mounted) return;
-    if (status == 'not_found') {
+    if (resolved.status == 'not_found') {
       setState(() {
         _nfcState = _NfcState.notFound;
         _loading = false;
       });
       return;
     }
-    if (status == 'unassigned') {
+    if (resolved.status == 'unassigned') {
       setState(() {
         _nfcState = _NfcState.unassigned;
         _loading = false;
@@ -144,15 +207,13 @@ class _PublicCardViewState extends State<PublicCardView> {
       return;
     }
     // assigned — load the card
-    final card = await CardRepository.fetchByNfcSerial(
-      widget.nfcSerial!,
-      includeOrganizationLogo: false,
-    );
+    final card = resolved.card;
     if (mounted) {
       setState(() {
         _card = card;
         _nfcState = _NfcState.showCard;
         _loading = false;
+        _logoPending = true;
       });
     }
     if (card != null && card.isActive) {
@@ -256,11 +317,15 @@ class _PublicCardViewState extends State<PublicCardView> {
       }
     }
 
+    if (_loadFailed) {
+      return _LoadErrorPage(errorDetail: _errorDetail, onRetry: _retryLoad);
+    }
+
     // ── Normal slug/userId flow ──
     if (_notFound || _card == null) {
       return _NotFoundPage(
         slug: widget.slug ?? widget.nfcSerial ?? widget.userId ?? '',
-        errorDetail: _errorDetail,
+        errorDetail: null,
       );
     }
     if (!_card!.isActive) {
@@ -270,7 +335,7 @@ class _PublicCardViewState extends State<PublicCardView> {
             : 'Tarjeta digital desactivada por seguridad',
       );
     }
-    return _CardPage(card: _card!);
+    return _CardPage(card: _card!, logoPending: _logoPending);
   }
 }
 
@@ -478,11 +543,13 @@ class _StripePainter extends CustomPainter {
 
 // ─── Card Page ────────────────────────────────────────────────────────────────
 
-Widget _buildCardHeader(DigitalCardModel card) => _HeroHeader(card: card);
+Widget _buildCardHeader(DigitalCardModel card, bool logoPending) =>
+    _HeroHeader(card: card, logoPending: logoPending);
 
 class _CardPage extends StatelessWidget {
   final DigitalCardModel card;
-  const _CardPage({required this.card});
+  final bool logoPending;
+  const _CardPage({required this.card, this.logoPending = false});
 
   @override
   Widget build(BuildContext context) {
@@ -497,7 +564,7 @@ class _CardPage extends StatelessWidget {
 
     final scrollView = CustomScrollView(
       slivers: [
-        SliverToBoxAdapter(child: _buildCardHeader(card)),
+        SliverToBoxAdapter(child: _buildCardHeader(card, logoPending)),
         SliverToBoxAdapter(
           child: _SaveContactButton(
             card: card,
@@ -898,7 +965,8 @@ class _ModernSecondaryButton extends StatelessWidget {
 
 class _HeroHeader extends StatelessWidget {
   final DigitalCardModel card;
-  const _HeroHeader({required this.card});
+  final bool logoPending;
+  const _HeroHeader({required this.card, this.logoPending = false});
 
   @override
   Widget build(BuildContext context) {
@@ -926,13 +994,17 @@ class _HeroHeader extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  // Logo de empresa (primero)
-                  if (card.companyLogoUrl != null &&
-                      card.companyLogoUrl!.isNotEmpty)
+                  // Logo de empresa (primero). While we don't yet know if
+                  // the org has a logo (logoPending), reserve the same slot
+                  // so that if one arrives it fades into existing space
+                  // instead of pushing the rest of the header down.
+                  if ((card.companyLogoUrl != null &&
+                          card.companyLogoUrl!.isNotEmpty) ||
+                      logoPending)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 34),
                       child: _PublicCompanyLogo(
-                        imageUrl: card.companyLogoUrl!,
+                        imageUrl: card.companyLogoUrl,
                         maxWidth: logoMaxWidth,
                         height: logoHeight,
                       ),
@@ -1023,7 +1095,10 @@ class _HeroHeader extends StatelessWidget {
 }
 
 class _PublicCompanyLogo extends StatelessWidget {
-  final String imageUrl;
+  // Null/empty while the org's logo hasn't resolved yet: renders an empty
+  // placeholder of the same size so the reserved slot doesn't shift once
+  // the real logo (or the "no logo" outcome) arrives.
+  final String? imageUrl;
   final double maxWidth;
   final double height;
 
@@ -1035,19 +1110,22 @@ class _PublicCompanyLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final url = imageUrl;
     return ConstrainedBox(
       constraints: BoxConstraints(maxWidth: maxWidth),
       child: SizedBox(
         width: maxWidth,
         height: height,
-        child: NativeWebImage(
-          imageUrl: imageUrl,
-          width: maxWidth,
-          height: height,
-          fit: BoxFit.contain,
-          eager: true,
-          highPriority: true,
-        ),
+        child: (url == null || url.isEmpty)
+            ? null
+            : NativeWebImage(
+                imageUrl: url,
+                width: maxWidth,
+                height: height,
+                fit: BoxFit.contain,
+                eager: true,
+                highPriority: true,
+              ),
       ),
     );
   }
@@ -1131,8 +1209,9 @@ class _SectionHeader extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 480),
           child: SizedBox(
             width: double.infinity,
-            child: Text(
-              title.toUpperCase(),
+            child: HelpTitle(
+              title: title.toUpperCase(),
+              helpText: 'Muestra la sección pública de $title en esta tarjeta.',
               style: GoogleFonts.outfit(
                 fontSize: 16,
                 fontWeight: FontWeight.w800,
@@ -1348,8 +1427,9 @@ class _ModernSectionHeader extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 480),
           child: SizedBox(
             width: double.infinity,
-            child: Text(
-              title,
+            child: HelpTitle(
+              title: title,
+              helpText: 'Muestra la sección pública de $title en esta tarjeta.',
               style: GoogleFonts.outfit(
                 fontSize: 19,
                 height: 1.1,
@@ -1591,7 +1671,7 @@ class _Footer extends StatelessWidget {
             const SizedBox(height: 20),
             GestureDetector(
               onTap: () async {
-                final uri = Uri.parse('https://liomont.taploop.com.mx');
+                final uri = Uri.parse('https://www.taploop.com.mx');
                 await _launchPublicUri(uri);
               },
               child: Row(
@@ -1747,7 +1827,10 @@ class _FormsSectionState extends State<_FormsSection> {
 
   Future<void> _loadForms() async {
     try {
-      final forms = await CardRepository.fetchSmartForms(widget.card.id);
+      final forms = await CardRepository.fetchSmartFormsForDisplay(
+        cardId: widget.card.id,
+        orgId: widget.card.orgId,
+      );
       final activeForms = forms.where((f) => f.isActive).toList();
       if (!mounted) return;
       setState(() {
@@ -2441,6 +2524,82 @@ class _NfcActivationPage extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ─── Load error (network/connectivity, not "card doesn't exist") ─────────────
+
+class _LoadErrorPage extends StatelessWidget {
+  final String? errorDetail;
+  final VoidCallback onRetry;
+  const _LoadErrorPage({required this.errorDetail, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.surface,
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: AppColors.border,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.wifi_off_rounded,
+                  size: 36,
+                  color: AppColors.grey,
+                ),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'No se pudo cargar el perfil',
+                style: GoogleFonts.outfit(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.black,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Revisa tu conexión a internet e intenta de nuevo.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.dmSans(fontSize: 14, color: AppColors.grey),
+              ),
+              if (errorDetail != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  errorDetail!,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.dmSans(
+                    fontSize: 11,
+                    color: AppColors.error,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 32),
+              GestureDetector(
+                onTap: onRetry,
+                child: Text(
+                  'Reintentar →',
+                  style: GoogleFonts.dmSans(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

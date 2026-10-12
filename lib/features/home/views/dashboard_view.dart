@@ -14,6 +14,7 @@ import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../core/widgets/card_initial_setup_state.dart';
 import '../../../core/widgets/empty_data_state.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_motion.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../analytics/models/analytics_summary_model.dart';
@@ -430,8 +431,10 @@ class _DashboardHeader extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Panel principal',
+              HelpTitle(
+                title: 'Panel principal',
+                helpText:
+                    'Resumen operativo de visitas, leads y accesos principales de tu tarjeta.',
                 style: GoogleFonts.outfit(
                   color: context.textPrimary,
                   fontSize: 28,
@@ -486,8 +489,10 @@ class _DashboardHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Panel principal',
+                HelpTitle(
+                  title: 'Panel principal',
+                  helpText:
+                      'Resumen operativo de visitas, leads y accesos principales de tu tarjeta.',
                   style: GoogleFonts.outfit(
                     color: context.textPrimary,
                     fontSize: 30,
@@ -679,8 +684,10 @@ class _StatCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 20),
-          Text(
-            label,
+          HelpTitle(
+            title: label,
+            helpText:
+                subtitle ?? 'Métrica resumida del rendimiento de tu tarjeta.',
             style: GoogleFonts.dmSans(
               color: context.textSecondary,
               fontSize: 12,
@@ -777,8 +784,10 @@ class _PerformancePanel extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Resumen de actividad',
+                    HelpTitle(
+                      title: 'Resumen de actividad',
+                      helpText:
+                          'Compara visitas, clics y toques NFC de los últimos días.',
                       style: GoogleFonts.outfit(
                         color: context.textPrimary,
                         fontSize: 20,
@@ -968,8 +977,10 @@ class _QuickActions extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Acciones rápidas',
+          HelpTitle(
+            title: 'Acciones rápidas',
+            helpText:
+                'Accesos directos para editar, compartir o revisar tu tarjeta.',
             style: GoogleFonts.outfit(
               color: context.textPrimary,
               fontSize: 20,
@@ -1136,8 +1147,10 @@ class _CardPreviewPanel extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'Tarjeta',
+              HelpTitle(
+                title: 'Tarjeta',
+                helpText:
+                    'Vista previa rápida de la tarjeta seleccionada y acceso a su perfil público.',
                 style: GoogleFonts.outfit(
                   color: context.textPrimary,
                   fontSize: 19,
@@ -1276,8 +1289,10 @@ class _ConversionPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Conversión',
+          HelpTitle(
+            title: 'Conversión',
+            helpText:
+                'Distribución de interacciones por visitas, clics y toques NFC.',
             style: GoogleFonts.outfit(
               color: context.textPrimary,
               fontSize: 19,
@@ -1424,8 +1439,9 @@ class _TopLinksPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Enlaces principales',
+          HelpTitle(
+            title: 'Enlaces principales',
+            helpText: 'Ranking de enlaces con más clics en tu tarjeta.',
             style: GoogleFonts.outfit(
               color: context.textPrimary,
               fontSize: 19,
@@ -1517,8 +1533,9 @@ class _ActivityPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Actividad reciente',
+          HelpTitle(
+            title: 'Actividad reciente',
+            helpText: 'Últimos eventos registrados por tus tarjetas y enlaces.',
             style: GoogleFonts.outfit(
               color: context.textPrimary,
               fontSize: 19,
@@ -1606,8 +1623,10 @@ class _LeadsTable extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Leads recientes',
+                    HelpTitle(
+                      title: 'Leads recientes',
+                      helpText:
+                          'Contactos capturados y priorizados por actividad reciente.',
                       style: GoogleFonts.outfit(
                         color: context.textPrimary,
                         fontSize: 20,
@@ -1682,9 +1701,18 @@ class _LeadsHeaderRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          Expanded(flex: 5, child: Text('LEAD', style: style)),
-          Expanded(flex: 4, child: Text('ETAPA', style: style)),
-          Expanded(flex: 3, child: Text('ÚLTIMA VISITA', style: style)),
+          Expanded(
+            flex: 5,
+            child: HelpTitle(title: 'LEAD', style: style),
+          ),
+          Expanded(
+            flex: 4,
+            child: HelpTitle(title: 'ETAPA', style: style),
+          ),
+          Expanded(
+            flex: 3,
+            child: HelpTitle(title: 'ÚLTIMA VISITA', style: style),
+          ),
         ],
       ),
     );

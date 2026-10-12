@@ -18,6 +18,8 @@ import '../../../core/utils/field_validators.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/card_repository.dart';
 import '../../../core/widgets/card_initial_setup_state.dart';
+import '../../../core/widgets/section_header.dart';
+import '../../../core/widgets/shared_template_lock_banner.dart';
 import '../../../core/widgets/taploop_button.dart';
 import '../../../core/widgets/taploop_motion.dart';
 import '../../../core/widgets/platform_icon.dart';
@@ -31,7 +33,15 @@ import '../utils/calendar_links.dart';
 import '../widgets/digital_profile_preview.dart';
 
 class EditCardView extends StatefulWidget {
-  const EditCardView({super.key});
+  const EditCardView({super.key, this.overrideCard, this.onClose});
+
+  /// When non-null, this view edits ANOTHER user's card (admin override mode)
+  /// instead of the authenticated user's own card. In this mode the global
+  /// [appState] is never mutated, so the admin's own session is unaffected.
+  final DigitalCardModel? overrideCard;
+
+  /// Shown as a close button in the header when provided (override mode).
+  final VoidCallback? onClose;
 
   @override
   State<EditCardView> createState() => _EditCardViewState();
@@ -66,25 +76,32 @@ class _EditCardViewState extends State<EditCardView>
   bool _sharedDesignLocked = false;
   bool _sharedFormsLocked = false;
   bool _sharedIntegrationsLocked = false;
+  bool _sharedLinksLocked = false;
+
+  bool get _isOverride => widget.overrideCard != null;
 
   @override
   void initState() {
     super.initState();
     _tab = TabController(length: 6, vsync: this);
     _tab.addListener(_syncStepWithTab);
-    appState.addListener(_onAppStateChanged);
-    _card =
-        appState.currentCard ??
-        DigitalCardModel(
-          id: '',
-          userId: '',
-          name: '',
-          jobTitle: '',
-          company: '',
-          contactItems: const [],
-          socialLinks: const [],
-          publicSlug: '',
-        );
+    if (_isOverride) {
+      _card = widget.overrideCard!;
+    } else {
+      appState.addListener(_onAppStateChanged);
+      _card =
+          appState.currentCard ??
+          DigitalCardModel(
+            id: '',
+            userId: '',
+            name: '',
+            jobTitle: '',
+            company: '',
+            contactItems: const [],
+            socialLinks: const [],
+            publicSlug: '',
+          );
+    }
     _nameCtrl = TextEditingController(text: _card.name);
     _titleCtrl = TextEditingController(text: _card.jobTitle);
     _companyCtrl = TextEditingController(text: _card.company);
@@ -98,7 +115,7 @@ class _EditCardViewState extends State<EditCardView>
 
   @override
   void dispose() {
-    appState.removeListener(_onAppStateChanged);
+    if (!_isOverride) appState.removeListener(_onAppStateChanged);
     _tab.removeListener(_syncStepWithTab);
     _tab.dispose();
     _nameCtrl.dispose();
@@ -172,31 +189,44 @@ class _EditCardViewState extends State<EditCardView>
         _sharedDesignLocked = false;
         _sharedFormsLocked = false;
         _sharedIntegrationsLocked = false;
+        _sharedLinksLocked = false;
       });
       return;
     }
 
     try {
+      // Shared-template toggles are org-wide, but while they're on they only
+      // hide a section for members OTHER than the template member: editing
+      // the template member is what every other member's public card reads
+      // from, so that member must always be able to edit it normally.
+      final sharedSettings = await CardRepository.fetchSharedTemplateSettings(
+        orgId,
+      );
+      final isTemplate =
+          sharedSettings?.templateCardId != null &&
+          sharedSettings!.templateCardId == _card.id;
+      final sharedDesign =
+          (sharedSettings?.designShared ?? false) && !isTemplate;
+      final sharedForms = (sharedSettings?.formsShared ?? false) && !isTemplate;
+      final sharedIntegrations =
+          (sharedSettings?.integrationsShared ?? false) && !isTemplate;
+      final sharedLinks = (sharedSettings?.linksShared ?? false) && !isTemplate;
+
       final rows = await SupabaseService.client
           .from('organizations')
-          .select(
-            'name, shared_design_enabled, shared_forms_enabled, shared_integrations_enabled',
-          )
+          .select('name')
           .eq('id', orgId)
           .limit(1);
       final orgRows = rows as List;
       final org = orgRows.isNotEmpty ? orgRows.first : null;
       final orgName = (org?['name'] as String?)?.trim();
-      final sharedDesign = org?['shared_design_enabled'] as bool? ?? false;
-      final sharedForms = org?['shared_forms_enabled'] as bool? ?? false;
-      final sharedIntegrations =
-          org?['shared_integrations_enabled'] as bool? ?? false;
       if (!mounted) return;
       if (orgName == null || orgName.isEmpty) {
         setState(() {
           _sharedDesignLocked = sharedDesign;
           _sharedFormsLocked = sharedForms;
           _sharedIntegrationsLocked = sharedIntegrations;
+          _sharedLinksLocked = sharedLinks;
         });
         return;
       }
@@ -210,6 +240,7 @@ class _EditCardViewState extends State<EditCardView>
         _sharedDesignLocked = sharedDesign;
         _sharedFormsLocked = sharedForms;
         _sharedIntegrationsLocked = sharedIntegrations;
+        _sharedLinksLocked = sharedLinks;
         _card = _card.copyWith(company: orgName);
         _unsaved = previousUnsaved;
       });
@@ -234,8 +265,7 @@ class _EditCardViewState extends State<EditCardView>
       );
       if (!mounted) return;
       final updatedCard = _card.copyWith(company: orgName, orgId: orgId);
-      appState.updateCard(updatedCard);
-      setState(() => _card = updatedCard);
+      _syncCard(updatedCard);
     } catch (_) {
     } finally {
       _syncingOrganizationCompany = false;
@@ -256,10 +286,13 @@ class _EditCardViewState extends State<EditCardView>
     _suppressTextSync = false;
   }
 
-  void _setCardAndSyncAppState(DigitalCardModel card) {
+  /// Updates the locally-edited card and, unless this view is editing
+  /// ANOTHER user's card (override mode), mirrors the change into the
+  /// global [appState] so the rest of the app stays in sync.
+  void _syncCard(DigitalCardModel card) {
     if (!mounted) return;
     setState(() => _card = card);
-    appState.updateCard(card);
+    if (!_isOverride) appState.updateCard(card);
   }
 
   Future<void> _loadFormCompletion() async {
@@ -322,7 +355,7 @@ class _EditCardViewState extends State<EditCardView>
           _companyCtrl.text.trim().isNotEmpty &&
           _bioCtrl.text.trim().isNotEmpty,
       hasVisibleContact,
-      hasVisibleSocial,
+      _sharedLinksLocked || hasVisibleSocial,
       true,
       _sharedFormsLocked || _hasCompletedForm,
       _sharedIntegrationsLocked || hasCalendar,
@@ -342,7 +375,7 @@ class _EditCardViewState extends State<EditCardView>
     setState(() => _saving = true);
     try {
       await CardRepository.saveCard(_card);
-      appState.updateCard(_card);
+      if (!_isOverride) appState.updateCard(_card);
       if (mounted) {
         setState(() {
           _saving = false;
@@ -382,9 +415,11 @@ class _EditCardViewState extends State<EditCardView>
         cardId: updatedCard.id,
         profilePhotoUrl: url,
       );
-      final appCard = appState.currentCard;
-      if (appCard?.id == updatedCard.id) {
-        appState.updateCard(appCard!.copyWith(profilePhotoUrl: url));
+      if (!_isOverride) {
+        final appCard = appState.currentCard;
+        if (appCard?.id == updatedCard.id) {
+          appState.updateCard(appCard!.copyWith(profilePhotoUrl: url));
+        }
       }
     } catch (_) {
       if (!mounted) return;
@@ -477,9 +512,7 @@ class _EditCardViewState extends State<EditCardView>
     try {
       final saved = await CardRepository.addContactItem(_card.id, item);
       if (mounted) {
-        _setCardAndSyncAppState(
-          _card.copyWith(contactItems: [..._card.contactItems, saved]),
-        );
+        _syncCard(_card.copyWith(contactItems: [..._card.contactItems, saved]));
         TapLoopToast.show(
           context,
           'Contacto añadido correctamente.',
@@ -501,7 +534,7 @@ class _EditCardViewState extends State<EditCardView>
     try {
       await CardRepository.updateContactItem(updatedItem);
       if (mounted) {
-        _setCardAndSyncAppState(
+        _syncCard(
           _card.copyWith(
             contactItems: _card.contactItems
                 .map((c) => c.id == updatedItem.id ? updatedItem : c)
@@ -603,9 +636,7 @@ class _EditCardViewState extends State<EditCardView>
     try {
       final saved = await CardRepository.addSocialLink(_card.id, link);
       if (mounted) {
-        _setCardAndSyncAppState(
-          _card.copyWith(socialLinks: [..._card.socialLinks, saved]),
-        );
+        _syncCard(_card.copyWith(socialLinks: [..._card.socialLinks, saved]));
         TapLoopToast.show(
           context,
           'Red social añadida correctamente.',
@@ -627,7 +658,7 @@ class _EditCardViewState extends State<EditCardView>
     try {
       await CardRepository.updateSocialLink(updatedLink);
       if (mounted) {
-        _setCardAndSyncAppState(
+        _syncCard(
           _card.copyWith(
             socialLinks: _card.socialLinks
                 .map((s) => s.id == updatedLink.id ? updatedLink : s)
@@ -680,9 +711,9 @@ class _EditCardViewState extends State<EditCardView>
           await CardRepository.updateContactItem(item);
         }
       }
-      await CardRepository.reorderContactItems(newItems);
+      await CardRepository.reorderContactItems(_card.id, newItems);
       if (mounted) {
-        _setCardAndSyncAppState(_card.copyWith(contactItems: newItems));
+        _syncCard(_card.copyWith(contactItems: newItems));
       }
       if (mounted && newItems.length < oldItems.length) {
         TapLoopToast.show(
@@ -695,7 +726,7 @@ class _EditCardViewState extends State<EditCardView>
       debugPrint('No se pudieron actualizar los contactos: $error');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
-        _setCardAndSyncAppState(_card.copyWith(contactItems: oldItems));
+        _syncCard(_card.copyWith(contactItems: oldItems));
         TapLoopToast.show(
           context,
           'No se pudieron actualizar los contactos. Intenta de nuevo.',
@@ -735,9 +766,9 @@ class _EditCardViewState extends State<EditCardView>
           await CardRepository.updateSocialLink(link);
         }
       }
-      await CardRepository.reorderSocialLinks(newLinks);
+      await CardRepository.reorderSocialLinks(_card.id, newLinks);
       if (mounted) {
-        _setCardAndSyncAppState(_card.copyWith(socialLinks: newLinks));
+        _syncCard(_card.copyWith(socialLinks: newLinks));
       }
       if (mounted && newLinks.length < oldLinks.length) {
         TapLoopToast.show(
@@ -750,7 +781,7 @@ class _EditCardViewState extends State<EditCardView>
       debugPrint('No se pudieron actualizar los enlaces: $error');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
-        _setCardAndSyncAppState(_card.copyWith(socialLinks: oldLinks));
+        _syncCard(_card.copyWith(socialLinks: oldLinks));
         TapLoopToast.show(
           context,
           'No se pudieron actualizar las redes sociales. Intenta de nuevo.',
@@ -763,7 +794,18 @@ class _EditCardViewState extends State<EditCardView>
   @override
   Widget build(BuildContext context) {
     final isDesktop = Responsive.isDesktop(context);
-    final hasLinkedCard = appState.currentCard != null;
+    final hasLinkedCard = _isOverride
+        ? _card.id.isNotEmpty
+        : appState.currentCard != null;
+    final overrideName = widget.overrideCard?.name.trim() ?? '';
+    final headerTitleText = _isOverride
+        ? (overrideName.isNotEmpty
+              ? 'Editando a $overrideName'
+              : 'Editando perfil del equipo')
+        : 'Perfil digital';
+    final headerSubtitleText = _isOverride
+        ? 'Estás editando el perfil de este miembro de tu equipo.'
+        : 'Edita tu perfil, contacto, diseño y flujos de captura desde un mismo espacio.';
     final headerTitle = ConstrainedBox(
       constraints: BoxConstraints(
         minWidth: isDesktop ? 320 : 240,
@@ -776,7 +818,7 @@ class _EditCardViewState extends State<EditCardView>
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                'Perfil digital',
+                headerTitleText,
                 style: GoogleFonts.outfit(
                   fontSize: isDesktop ? 34 : 30,
                   fontWeight: FontWeight.w800,
@@ -798,7 +840,7 @@ class _EditCardViewState extends State<EditCardView>
           ),
           const SizedBox(height: 6),
           Text(
-            'Edita tu perfil, contacto, diseño y flujos de captura desde un mismo espacio.',
+            headerSubtitleText,
             style: GoogleFonts.dmSans(
               fontSize: 15,
               color: context.textSecondary,
@@ -808,6 +850,27 @@ class _EditCardViewState extends State<EditCardView>
       ),
     );
     final stepControls = hasLinkedCard ? _buildStepControls() : null;
+    final closeButton = widget.onClose == null
+        ? null
+        : TapLoopPressable(
+            onTap: widget.onClose,
+            borderRadius: BorderRadius.circular(999),
+            hoverColor: TapLoopMotion.hoverSurfaceColor(context),
+            child: Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: context.bgCard,
+                shape: BoxShape.circle,
+                border: Border.all(color: context.borderStrongSoft),
+              ),
+              child: Icon(
+                Icons.close_rounded,
+                size: 18,
+                color: context.textSecondary,
+              ),
+            ),
+          );
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -828,12 +891,25 @@ class _EditCardViewState extends State<EditCardView>
                       children: [
                         Expanded(child: headerTitle),
                         if (stepControls != null) stepControls,
+                        if (closeButton != null) ...[
+                          const SizedBox(width: 10),
+                          closeButton,
+                        ],
                       ],
                     )
                   : Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        headerTitle,
+                        if (closeButton != null)
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Expanded(child: headerTitle),
+                              closeButton,
+                            ],
+                          )
+                        else
+                          headerTitle,
                         if (stepControls != null) ...[
                           const SizedBox(height: 14),
                           stepControls,
@@ -1023,11 +1099,13 @@ class _EditCardViewState extends State<EditCardView>
           _card = c;
           _unsaved = true;
         });
-        final appCard = appState.currentCard;
-        if (verifiedChanged && appCard?.id == c.id) {
-          appState.updateCard(
-            appCard!.copyWith(showVerifiedBadge: c.showVerifiedBadge),
-          );
+        if (!_isOverride) {
+          final appCard = appState.currentCard;
+          if (verifiedChanged && appCard?.id == c.id) {
+            appState.updateCard(
+              appCard!.copyWith(showVerifiedBadge: c.showVerifiedBadge),
+            );
+          }
         }
       },
     ),
@@ -1037,18 +1115,26 @@ class _EditCardViewState extends State<EditCardView>
       onAdd: _showAddContact,
       onEdit: _showEditContact,
     ),
-    _SocialTab(
-      card: _card,
-      onChanged: (c) => _handleSocialsChanged(c),
-      onAdd: _showAddSocial,
-      onEdit: _showEditSocial,
-    ),
+    if (_sharedLinksLocked)
+      const SharedTemplateLockBanner(
+        icon: Icons.link_rounded,
+        title: 'Enlaces compartidos activos',
+        message:
+            'Esta sección es gestionada por tu organización: tus redes sociales públicas se toman del perfil plantilla del equipo.',
+      )
+    else
+      _SocialTab(
+        card: _card,
+        onChanged: (c) => _handleSocialsChanged(c),
+        onAdd: _showAddSocial,
+        onEdit: _showEditSocial,
+      ),
     if (_sharedDesignLocked)
-      const _OrganizationSharedLockTab(
+      const SharedTemplateLockBanner(
         icon: Icons.palette_outlined,
         title: 'Diseño compartido activo',
         message:
-            'La configuración de diseño se gestiona desde Administración para toda la organización.',
+            'Esta sección es gestionada por tu organización: tu diseño público se toma del perfil plantilla del equipo.',
       )
     else
       _DesignTab(
@@ -1059,11 +1145,11 @@ class _EditCardViewState extends State<EditCardView>
         }),
       ),
     if (_sharedFormsLocked)
-      const _OrganizationSharedLockTab(
+      const SharedTemplateLockBanner(
         icon: Icons.assignment_outlined,
         title: 'Formulario compartido activo',
         message:
-            'Los formularios se gestionan desde Administración y se aplican a todos los miembros de la organización.',
+            'Esta sección es gestionada por tu organización: tu formulario público se toma del perfil plantilla del equipo.',
       )
     else
       _FormulariosTab(
@@ -1077,11 +1163,11 @@ class _EditCardViewState extends State<EditCardView>
         },
       ),
     if (_sharedIntegrationsLocked)
-      const _OrganizationSharedLockTab(
+      const SharedTemplateLockBanner(
         icon: Icons.admin_panel_settings_outlined,
         title: 'Integración compartida activa',
         message:
-            'Las integraciones se gestionan desde Administración y reemplazan la configuración individual.',
+            'Esta sección es gestionada por tu organización: tu calendario público se toma del perfil plantilla del equipo.',
       )
     else
       _CalendarioTab(
@@ -1096,140 +1182,6 @@ class _EditCardViewState extends State<EditCardView>
         }),
       ),
   ];
-}
-
-class SharedProfileDesignEditor extends StatelessWidget {
-  final DigitalCardModel card;
-  final ValueChanged<DigitalCardModel> onChanged;
-
-  const SharedProfileDesignEditor({
-    super.key,
-    required this.card,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _DesignTab(card: card, onChanged: onChanged, embedded: true);
-  }
-}
-
-class SharedProfileFormsEditor extends StatelessWidget {
-  final String cardId;
-  final ValueChanged<List<SmartFormModel>> onFormsChanged;
-
-  const SharedProfileFormsEditor({
-    super.key,
-    required this.cardId,
-    required this.onFormsChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _FormulariosTab(
-      cardId: cardId,
-      embedded: true,
-      onCompletionChanged: (_) {},
-      onFormsChanged: onFormsChanged,
-    );
-  }
-}
-
-class SharedProfileIntegrationsEditor extends StatelessWidget {
-  final bool calendarEnabled;
-  final String? calendarUrl;
-  final void Function(bool enabled, String url) onChanged;
-
-  const SharedProfileIntegrationsEditor({
-    super.key,
-    required this.calendarEnabled,
-    required this.calendarUrl,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return _CalendarioTab(
-      calendarEnabled: calendarEnabled,
-      calendarUrl: calendarUrl,
-      embedded: true,
-      onChanged: onChanged,
-    );
-  }
-}
-
-class _OrganizationSharedLockTab extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String message;
-
-  const _OrganizationSharedLockTab({
-    required this.icon,
-    required this.title,
-    required this.message,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(28, 30, 28, 48),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(28),
-            decoration: BoxDecoration(
-              color: AppColors.primary.withValues(alpha: 0.04),
-              borderRadius: BorderRadius.circular(22),
-              border: Border.all(
-                color: AppColors.primary.withValues(alpha: 0.24),
-              ),
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(
-                    color: AppColors.primary.withValues(alpha: 0.1),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(icon, color: AppColors.primary, size: 24),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: GoogleFonts.outfit(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w800,
-                          color: context.textPrimary,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        message,
-                        style: GoogleFonts.dmSans(
-                          fontSize: 14,
-                          height: 1.45,
-                          color: context.textSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
 }
 
 class _EditStepData {
@@ -1587,8 +1539,10 @@ class _LivePreviewPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'Vista previa',
+            HelpTitle(
+              title: 'Vista previa',
+              helpText:
+                  'Previsualiza cómo se verá el perfil público antes de publicar cambios.',
               style: GoogleFonts.outfit(
                 fontSize: 22,
                 fontWeight: FontWeight.w800,
@@ -1798,7 +1752,7 @@ class _ProfileTabState extends State<_ProfileTab> {
                 ],
               ),
               const SizedBox(height: 26),
-              _AvatarPicker(
+              AvatarPicker(
                 card: widget.card,
                 onPhotoChanged: widget.onPhotoChanged,
               ),
@@ -1863,16 +1817,20 @@ class _ProfileTabState extends State<_ProfileTab> {
   }
 }
 
-class _AvatarPicker extends StatefulWidget {
+class AvatarPicker extends StatefulWidget {
   final DigitalCardModel card;
   final Future<void> Function(String) onPhotoChanged;
-  const _AvatarPicker({required this.card, required this.onPhotoChanged});
+  const AvatarPicker({
+    super.key,
+    required this.card,
+    required this.onPhotoChanged,
+  });
 
   @override
-  State<_AvatarPicker> createState() => _AvatarPickerState();
+  State<AvatarPicker> createState() => AvatarPickerState();
 }
 
-class _AvatarPickerState extends State<_AvatarPicker> {
+class AvatarPickerState extends State<AvatarPicker> {
   bool _uploading = false;
 
   Future<void> _pickAndUpload() async {
@@ -2226,8 +2184,9 @@ class _ImageAdjustmentDialogState extends State<_ImageAdjustmentDialog> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  widget.title,
+                                HelpTitle(
+                                  title: widget.title,
+                                  helpText: widget.subtitle,
                                   style: GoogleFonts.outfit(
                                     fontSize: 28,
                                     fontWeight: FontWeight.w800,
@@ -2277,8 +2236,9 @@ class _ImageAdjustmentDialogState extends State<_ImageAdjustmentDialog> {
                         ),
                       ),
                       const SizedBox(height: 20),
-                      Text(
-                        'Zoom',
+                      HelpTitle(
+                        title: 'Zoom',
+                        helpText: 'Ajusta el acercamiento de la imagen.',
                         style: GoogleFonts.outfit(
                           fontSize: 15,
                           fontWeight: FontWeight.w800,
@@ -2305,8 +2265,10 @@ class _ImageAdjustmentDialogState extends State<_ImageAdjustmentDialog> {
                         ),
                       ),
                       const SizedBox(height: 12),
-                      Text(
-                        'Posición',
+                      HelpTitle(
+                        title: 'Posición',
+                        helpText:
+                            'Elige el encuadre de la imagen dentro del recorte.',
                         style: GoogleFonts.outfit(
                           fontSize: 15,
                           fontWeight: FontWeight.w800,
@@ -3475,12 +3437,7 @@ Color _socialPlatformColor(SocialPlatform platform) {
 class _DesignTab extends StatelessWidget {
   final DigitalCardModel card;
   final ValueChanged<DigitalCardModel> onChanged;
-  final bool embedded;
-  const _DesignTab({
-    required this.card,
-    required this.onChanged,
-    this.embedded = false,
-  });
+  const _DesignTab({required this.card, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -3645,10 +3602,6 @@ class _DesignTab extends StatelessWidget {
       ),
     );
 
-    if (embedded) {
-      return settingsContent;
-    }
-
     if (isDesktop) {
       return SingleChildScrollView(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
@@ -3789,8 +3742,9 @@ class _DesignSectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
+          HelpTitle(
+            title: title,
+            helpText: 'Configura las opciones de $title en esta tarjeta.',
             style: GoogleFonts.outfit(
               fontSize: 15,
               fontWeight: FontWeight.w800,
@@ -4393,8 +4347,10 @@ class _ProfileDesignSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Estilo de perfil',
+          HelpTitle(
+            title: 'Estilo de perfil',
+            helpText:
+                'Selecciona la apariencia pública que usará esta tarjeta digital.',
             style: GoogleFonts.outfit(
               fontSize: 20,
               fontWeight: FontWeight.w800,
@@ -4601,8 +4557,9 @@ class _EditorInlineMetric extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 2),
-        Text(
-          label,
+        HelpTitle(
+          title: label,
+          helpText: 'Métrica del perfil digital para $label.',
           style: GoogleFonts.dmSans(
             fontSize: 14,
             fontWeight: FontWeight.w700,
@@ -6054,12 +6011,10 @@ class _FormulariosTab extends StatefulWidget {
   final String cardId;
   final ValueChanged<bool> onCompletionChanged;
   final ValueChanged<List<SmartFormModel>> onFormsChanged;
-  final bool embedded;
   const _FormulariosTab({
     required this.cardId,
     required this.onCompletionChanged,
     required this.onFormsChanged,
-    this.embedded = false,
   });
 
   @override
@@ -6609,7 +6564,6 @@ class _FormulariosTabState extends State<_FormulariosTab> {
         ),
       ),
     );
-    if (widget.embedded) return content;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(28, 30, 28, 48),
       child: content,
@@ -6954,13 +6908,11 @@ class _CalendarioTab extends StatefulWidget {
   final bool calendarEnabled;
   final String? calendarUrl;
   final void Function(bool enabled, String url) onChanged;
-  final bool embedded;
 
   const _CalendarioTab({
     required this.calendarEnabled,
     required this.calendarUrl,
     required this.onChanged,
-    this.embedded = false,
   });
 
   @override
@@ -7366,7 +7318,6 @@ class _CalendarioTabState extends State<_CalendarioTab> {
         ),
       ),
     );
-    if (widget.embedded) return content;
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(28, 30, 28, 48),
       child: content,

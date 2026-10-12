@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme_extensions.dart';
+import '../../../core/widgets/section_header.dart';
 
 class StatCard extends StatelessWidget {
   final String label;
@@ -80,8 +81,9 @@ class StatCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 2),
-          Text(
-            label,
+          HelpTitle(
+            title: label,
+            helpText: 'Indicador de analítica para $label.',
             style: GoogleFonts.dmSans(
               fontSize: 12,
               color: context.textSecondary,

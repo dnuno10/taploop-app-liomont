@@ -25,17 +25,41 @@ class AuthLayout extends StatelessWidget {
             ),
             child: ConstrainedBox(
               constraints: BoxConstraints(maxWidth: cardWidth),
-              child: Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: isMobile ? 22 : 52,
-                  vertical: isMobile ? 24 : 52,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(isMobile ? 28 : 32),
-                  border: Border.all(color: const Color(0xFFE4E9F0), width: 1),
-                ),
-                child: child,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isMobile ? 22 : 52,
+                      vertical: isMobile ? 24 : 52,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(isMobile ? 28 : 32),
+                      border: Border.all(
+                        color: const Color(0xFFE4E9F0),
+                        width: 1,
+                      ),
+                    ),
+                    child: child,
+                  ),
+                  SizedBox(height: isMobile ? 20 : 28),
+                  const Text(
+                    'ACCESO CORPORATIVO',
+                    style: TextStyle(
+                      fontSize: 11,
+                      letterSpacing: 1.6,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF8A94A6),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Image.asset(
+                    'assets/images/liomont.png',
+                    height: isMobile ? 22 : 26,
+                    fit: BoxFit.contain,
+                  ),
+                ],
               ),
             ),
           ),

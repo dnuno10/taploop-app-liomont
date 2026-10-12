@@ -12,8 +12,13 @@ import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/analytics_repository.dart';
+import '../../../core/data/repositories/card_repository.dart';
 import '../../../core/services/metrics_realtime_service.dart';
 import '../../../core/widgets/card_initial_setup_state.dart';
+import '../../../core/widgets/section_header.dart';
+import '../../../core/widgets/taploop_button.dart';
+import '../../../core/widgets/taploop_text_field.dart';
+import '../../../core/widgets/taploop_toast.dart';
 import '../../analytics/models/analytics_summary_model.dart';
 import '../widgets/qr_code_widget.dart';
 
@@ -110,6 +115,129 @@ class _ShareCardViewState extends State<ShareCardView> {
     });
   }
 
+  Future<void> _editSlug() async {
+    final card = appState.currentCard;
+    if (card == null) return;
+    final controller = TextEditingController(text: card.publicSlug);
+    String? errorText;
+    final newSlug = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            backgroundColor: ctx.bgCard,
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Enlace público',
+                    style: GoogleFonts.outfit(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: ctx.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'liomont.taploop.com.mx/',
+                    style: GoogleFonts.dmSans(
+                      fontSize: 13,
+                      color: ctx.textSecondary,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TapLoopTextField(
+                    label: 'Enlace',
+                    controller: controller,
+                    hint: 'tu-nombre',
+                    autofocus: true,
+                  ),
+                  if (errorText != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      errorText!,
+                      style: GoogleFonts.dmSans(
+                        fontSize: 12,
+                        color: AppColors.error,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('Cancelar'),
+                      ),
+                      const SizedBox(width: 8),
+                      TapLoopButton(
+                        label: 'Guardar',
+                        onPressed: () async {
+                          final candidate = controller.text
+                              .trim()
+                              .toLowerCase();
+                          if (!CardRepository.slugPattern.hasMatch(candidate)) {
+                            setDialogState(() {
+                              errorText =
+                                  'Usa solo letras minúsculas, números y guiones (ej. juan-perez).';
+                            });
+                            return;
+                          }
+                          if (candidate == card.publicSlug) {
+                            Navigator.pop(ctx);
+                            return;
+                          }
+                          final available =
+                              await CardRepository.isSlugAvailable(
+                                candidate,
+                                excludingCardId: card.id,
+                              );
+                          if (!ctx.mounted) return;
+                          if (!available) {
+                            setDialogState(() {
+                              errorText = 'Ese enlace ya está en uso.';
+                            });
+                            return;
+                          }
+                          Navigator.pop(ctx, candidate);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    if (newSlug == null || newSlug.isEmpty || !mounted) return;
+    try {
+      await CardRepository.updateSlug(cardId: card.id, slug: newSlug);
+      if (!mounted) return;
+      appState.updateCard(card.copyWith(publicSlug: newSlug));
+      TapLoopToast.show(
+        context,
+        'Enlace actualizado correctamente.',
+        TapLoopToastType.success,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      TapLoopToast.show(
+        context,
+        'No se pudo actualizar el enlace. Intenta de nuevo.',
+        TapLoopToastType.error,
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -164,6 +292,7 @@ class _ShareCardViewState extends State<ShareCardView> {
                           ? _DesktopLayout(
                               linkCopied: _linkCopied,
                               onCopy: _copyLink,
+                              onEditSlug: _editSlug,
                               qrColor: effectiveQrColor,
                               qrPalette: _qrPalette,
                               onQrColorChanged: (c) =>
@@ -173,6 +302,7 @@ class _ShareCardViewState extends State<ShareCardView> {
                           : _MobileLayout(
                               linkCopied: _linkCopied,
                               onCopy: _copyLink,
+                              onEditSlug: _editSlug,
                               isMobile: isMobile,
                               qrColor: effectiveQrColor,
                               qrPalette: _qrPalette,
@@ -205,6 +335,7 @@ class _ShareCardViewState extends State<ShareCardView> {
 class _MobileLayout extends StatelessWidget {
   final bool linkCopied;
   final VoidCallback onCopy;
+  final VoidCallback onEditSlug;
   final bool isMobile;
   final Color qrColor;
   final List<Color> qrPalette;
@@ -214,6 +345,7 @@ class _MobileLayout extends StatelessWidget {
   const _MobileLayout({
     required this.linkCopied,
     required this.onCopy,
+    required this.onEditSlug,
     required this.isMobile,
     required this.qrColor,
     required this.qrPalette,
@@ -247,7 +379,11 @@ class _MobileLayout extends StatelessWidget {
                           'Copia el enlace o envíalo por tus canales principales.',
                     ),
                     const SizedBox(height: 18),
-                    _LinkBar(copied: linkCopied, onCopy: onCopy),
+                    _LinkBar(
+                      copied: linkCopied,
+                      onCopy: onCopy,
+                      onEditSlug: onEditSlug,
+                    ),
                     const SizedBox(height: 20),
                     const _QuickShareSection(),
                   ],
@@ -275,6 +411,7 @@ class _MobileLayout extends StatelessWidget {
 class _DesktopLayout extends StatelessWidget {
   final bool linkCopied;
   final VoidCallback onCopy;
+  final VoidCallback onEditSlug;
   final Color qrColor;
   final List<Color> qrPalette;
   final ValueChanged<Color> onQrColorChanged;
@@ -283,6 +420,7 @@ class _DesktopLayout extends StatelessWidget {
   const _DesktopLayout({
     required this.linkCopied,
     required this.onCopy,
+    required this.onEditSlug,
     required this.qrColor,
     required this.qrPalette,
     required this.onQrColorChanged,
@@ -313,7 +451,11 @@ class _DesktopLayout extends StatelessWidget {
                             'Administra el enlace principal y distribúyelo desde aquí.',
                       ),
                       const SizedBox(height: 18),
-                      _LinkBar(copied: linkCopied, onCopy: onCopy),
+                      _LinkBar(
+                        copied: linkCopied,
+                        onCopy: onCopy,
+                        onEditSlug: onEditSlug,
+                      ),
                       const SizedBox(height: 20),
                       const _QuickShareSection(),
                     ],
@@ -355,8 +497,10 @@ class _CardHeroSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            isDesktop ? 'Centro de distribución' : 'Compartir contacto',
+          HelpTitle(
+            title: isDesktop ? 'Centro de distribución' : 'Compartir contacto',
+            helpText:
+                'Centro para compartir tu tarjeta mediante enlace, QR y acciones rápidas.',
             style: GoogleFonts.outfit(
               fontSize: 24,
               fontWeight: FontWeight.w800,
@@ -479,8 +623,9 @@ class _StatChip extends StatelessWidget {
             children: [
               Icon(icon, size: 12, color: context.textSecondary),
               const SizedBox(width: 5),
-              Text(
-                label,
+              HelpTitle(
+                title: label,
+                helpText: 'Métrica de uso para $label.',
                 style: GoogleFonts.dmSans(
                   fontSize: 12,
                   color: context.textSecondary,
@@ -695,15 +840,22 @@ class _QrActionButton extends StatelessWidget {
 class _LinkBar extends StatelessWidget {
   final bool copied;
   final VoidCallback onCopy;
-  const _LinkBar({required this.copied, required this.onCopy});
+  final VoidCallback onEditSlug;
+  const _LinkBar({
+    required this.copied,
+    required this.onCopy,
+    required this.onEditSlug,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Enlace público',
+        HelpTitle(
+          title: 'Enlace público',
+          helpText:
+              'URL pública que puedes copiar o personalizar para compartir.',
           style: GoogleFonts.dmSans(
             fontSize: 12,
             fontWeight: FontWeight.w700,
@@ -727,6 +879,18 @@ class _LinkBar extends StatelessWidget {
                   color: context.textPrimary,
                 ),
                 overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            MouseRegion(
+              cursor: SystemMouseCursors.click,
+              child: GestureDetector(
+                onTap: onEditSlug,
+                child: Icon(
+                  Icons.edit_outlined,
+                  size: 16,
+                  color: context.textSecondary,
+                ),
               ),
             ),
           ],
@@ -943,8 +1107,9 @@ class _SectionHeading extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          title,
+        HelpTitle(
+          title: title,
+          helpText: subtitle,
           style: GoogleFonts.outfit(
             fontSize: 20,
             fontWeight: FontWeight.w800,

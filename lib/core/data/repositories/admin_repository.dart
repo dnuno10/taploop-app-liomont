@@ -1,4 +1,5 @@
 import '../../services/supabase_service.dart';
+import '../../utils/request_deduper.dart';
 import 'card_repository.dart';
 import '../../../features/analytics/models/team_member_model.dart';
 import '../../../features/auth/models/user_model.dart';
@@ -28,7 +29,19 @@ class AdminRepository {
 
   // ─── Fetch org members ────────────────────────────────────────────────────
 
-  static Future<List<TeamMemberModel>> fetchTeamMembers(String orgId) async {
+  static Future<List<TeamMemberModel>> fetchTeamMembers(String orgId) {
+    // Dashboard, analytics, lead-intelligence and team-performance screens
+    // all call this for the same org within milliseconds of each other —
+    // coalesce overlapping calls into a single round trip.
+    return RequestDeduper.run(
+      'fetchTeamMembers:$orgId',
+      () => _fetchTeamMembersUncached(orgId),
+    );
+  }
+
+  static Future<List<TeamMemberModel>> _fetchTeamMembersUncached(
+    String orgId,
+  ) async {
     final now = DateTime.now();
     final rangeStart = DateTime(
       now.year,
@@ -88,11 +101,22 @@ class AdminRepository {
     final linkStatsByCard = <String, Map<String, TeamMemberLinkStat>>{};
 
     if (allCardIds.isNotEmpty) {
-      final visitRows = await _db
-          .from('visit_events')
-          .select('card_id, source, timestamp, contact_item_id, social_link_id')
-          .inFilter('card_id', allCardIds);
-      final rawVisitRows = (visitRows as List).cast<Map<String, dynamic>>();
+      // visit_events and leads are independent of each other — fetch both
+      // at once instead of one after the other.
+      final fetched = await Future.wait<dynamic>([
+        _db
+            .from('visit_events')
+            .select(
+              'card_id, source, timestamp, contact_item_id, social_link_id',
+            )
+            .inFilter('card_id', allCardIds),
+        _db
+            .from('leads')
+            .select('card_id, is_converted')
+            .inFilter('card_id', allCardIds),
+      ]);
+      final rawVisitRows = (fetched[0] as List).cast<Map<String, dynamic>>();
+      final leadRows = (fetched[1] as List).cast<Map<String, dynamic>>();
       final currentLinksByRef = await _fetchCurrentLinksByRef(
         cardIds: allCardIds,
         contactItemIds: rawVisitRows
@@ -171,11 +195,7 @@ class AdminRepository {
         }
       }
 
-      final leadRows = await _db
-          .from('leads')
-          .select('card_id, is_converted')
-          .inFilter('card_id', allCardIds);
-      for (final row in (leadRows as List).cast<Map<String, dynamic>>()) {
+      for (final row in leadRows) {
         final cardId = row['card_id'] as String?;
         if (cardId == null) continue;
         final converted = row['is_converted'] as bool? ?? false;
@@ -303,6 +323,93 @@ class AdminRepository {
     );
   }
 
+  /// Batched version of [fetchCardForUser]: resolves the primary card (plus
+  /// its contact items, social links and smart forms) for every user in
+  /// [userIds] using one query per table instead of 4 queries per user.
+  static Future<Map<String, DigitalCardModel>> fetchCardsForUsers(
+    List<String> userIds,
+  ) async {
+    final result = <String, DigitalCardModel>{};
+    final ids = userIds.toSet().toList();
+    if (ids.isEmpty) return result;
+
+    final cardRows = await _db
+        .from('digital_cards')
+        .select()
+        .inFilter('user_id', ids);
+    final cardsList = (cardRows as List).cast<Map<String, dynamic>>();
+    if (cardsList.isEmpty) return result;
+
+    // Keep at most one card per user, same semantics as fetchCardForUser's
+    // `.limit(1)`.
+    final cardJsonByUserId = <String, Map<String, dynamic>>{};
+    for (final row in cardsList) {
+      final userId = row['user_id'] as String?;
+      if (userId == null || cardJsonByUserId.containsKey(userId)) continue;
+      cardJsonByUserId[userId] = row;
+    }
+
+    final cardIds = cardJsonByUserId.values
+        .map((row) => row['id'] as String)
+        .toList();
+    if (cardIds.isEmpty) return result;
+
+    final contactsRows = await _db
+        .from('contact_items')
+        .select()
+        .inFilter('card_id', cardIds)
+        .order('sort_order');
+    final socialsRows = await _db
+        .from('social_links')
+        .select()
+        .inFilter('card_id', cardIds)
+        .order('sort_order');
+    final formsRows = await _db
+        .from('smart_forms')
+        .select()
+        .inFilter('card_id', cardIds)
+        .order('created_at');
+
+    final contactsByCard = <String, List<ContactItemModel>>{};
+    for (final row in (contactsRows as List).cast<Map<String, dynamic>>()) {
+      final cardId = row['card_id'] as String?;
+      if (cardId == null) continue;
+      contactsByCard
+          .putIfAbsent(cardId, () => [])
+          .add(ContactItemModel.fromJson(row));
+    }
+
+    final socialsByCard = <String, List<SocialLinkModel>>{};
+    for (final row in (socialsRows as List).cast<Map<String, dynamic>>()) {
+      final cardId = row['card_id'] as String?;
+      if (cardId == null) continue;
+      socialsByCard
+          .putIfAbsent(cardId, () => [])
+          .add(SocialLinkModel.fromJson(row));
+    }
+
+    final formsByCard = <String, List<SmartFormModel>>{};
+    for (final row in (formsRows as List).cast<Map<String, dynamic>>()) {
+      final cardId = row['card_id'] as String?;
+      if (cardId == null) continue;
+      formsByCard
+          .putIfAbsent(cardId, () => [])
+          .add(SmartFormModel.fromJson(row));
+    }
+
+    for (final entry in cardJsonByUserId.entries) {
+      final cardId = entry.value['id'] as String;
+      result[entry.key] = await CardRepository.buildCardModel(
+        entry.value,
+        contactItems: contactsByCard[cardId] ?? const [],
+        socialLinks: socialsByCard[cardId] ?? const [],
+        smartForms: formsByCard[cardId] ?? const [],
+      );
+    }
+
+    return result;
+  }
+
   // ─── Update member ────────────────────────────────────────────────────────
 
   static Future<void> updateUser(UserModel user) async {
@@ -407,11 +514,24 @@ class AdminRepository {
         message.contains('Could not find the function');
   }
 
+  /// Persists the 4 "shared template" toggles and/or which card acts as the
+  /// org's template. Nothing is copied into member cards anymore — every
+  /// reader resolves the effective design/forms/links/integrations at read
+  /// time (see [CardRepository]'s shared-template resolution), so turning a
+  /// toggle on/off is a single-row write regardless of team size, and a
+  /// member's own configuration is never overwritten or lost.
+  ///
+  /// When [templateCardId] is provided, it is verified (defense in depth,
+  /// on top of RLS) to belong to a `digital_cards` row owned by a user of
+  /// [orgId] before being saved, so a template can never point at another
+  /// organization's card.
   static Future<void> updateOrgConsistencySettings({
     required String orgId,
     bool? sharedDesignEnabled,
     bool? sharedFormsEnabled,
     bool? sharedIntegrationsEnabled,
+    bool? sharedLinksEnabled,
+    String? templateCardId,
   }) async {
     final payload = <String, dynamic>{
       if (sharedDesignEnabled != null)
@@ -420,77 +540,40 @@ class AdminRepository {
         'shared_forms_enabled': sharedFormsEnabled,
       if (sharedIntegrationsEnabled != null)
         'shared_integrations_enabled': sharedIntegrationsEnabled,
+      if (sharedLinksEnabled != null) 'shared_links_enabled': sharedLinksEnabled,
     };
+
+    if (templateCardId != null) {
+      final trimmed = templateCardId.trim();
+      if (trimmed.isEmpty) {
+        payload['shared_template_card_id'] = null;
+      } else {
+        final rows = await _db
+            .from('digital_cards')
+            .select('id, org_id, user_id, users:user_id(org_id)')
+            .eq('id', trimmed)
+            .limit(1);
+        final cardRows = (rows as List).cast<Map<String, dynamic>>();
+        if (cardRows.isEmpty) {
+          throw Exception('La tarjeta plantilla no existe.');
+        }
+        final cardRow = cardRows.first;
+        final cardOrgId = (cardRow['org_id'] as String?)?.trim();
+        final ownerOrgId =
+            ((cardRow['users'] as Map<String, dynamic>?)?['org_id']
+                    as String?)
+                ?.trim();
+        if (cardOrgId != orgId && ownerOrgId != orgId) {
+          throw Exception(
+            'La tarjeta plantilla debe pertenecer a tu organización.',
+          );
+        }
+        payload['shared_template_card_id'] = trimmed;
+      }
+    }
+
     if (payload.isEmpty) return;
     await _db.from('organizations').update(payload).eq('id', orgId);
-  }
-
-  static Future<void> applySharedDesign({
-    required DigitalCardModel sourceCard,
-    required List<String> targetCardIds,
-  }) async {
-    final cardIds = _normalizedCardIds(targetCardIds);
-    if (cardIds.isEmpty) return;
-    final payload = {
-      'theme_style': sourceCard.themeStyle.name,
-      'layout_style': sourceCard.profileDesign.compatibleLayoutStyle.name,
-      'profile_design': sourceCard.profileDesign.name,
-      'primary_color': sourceCard.primaryColor.toARGB32(),
-      'icon_color': sourceCard.iconColor.toARGB32(),
-      'background_color_start': sourceCard.backgroundColorStart?.toARGB32(),
-      'background_color_end': sourceCard.backgroundColorEnd?.toARGB32(),
-      'bg_style': sourceCard.bgStyle.name,
-      'bg_color': sourceCard.bgColor?.toARGB32(),
-      'bg_color_end': sourceCard.bgColorEnd?.toARGB32(),
-      'show_verified_badge': sourceCard.showVerifiedBadge,
-    };
-    try {
-      await _db.from('digital_cards').update(payload).inFilter('id', cardIds);
-    } catch (error) {
-      if (!_isMissingColumn(error, 'icon_color')) rethrow;
-      final fallback = Map<String, dynamic>.from(payload)..remove('icon_color');
-      await _db.from('digital_cards').update(fallback).inFilter('id', cardIds);
-    }
-  }
-
-  static Future<void> applySharedForms({
-    required String sourceCardId,
-    required List<String> targetCardIds,
-  }) async {
-    final cardIds = _normalizedCardIds(targetCardIds);
-    if (cardIds.isEmpty) return;
-    final sourceForms = await CardRepository.fetchSmartForms(sourceCardId);
-    for (final cardId in cardIds) {
-      if (cardId == sourceCardId) continue;
-      await replaceSmartForms(cardId: cardId, forms: sourceForms);
-    }
-  }
-
-  static Future<void> applySharedIntegrations({
-    required DigitalCardModel sourceCard,
-    required List<String> targetCardIds,
-  }) async {
-    final cardIds = _normalizedCardIds(targetCardIds);
-    if (cardIds.isEmpty) return;
-    await _db
-        .from('digital_cards')
-        .update({
-          'calendar_enabled':
-              sourceCard.calendarEnabled &&
-              (sourceCard.calendarUrl?.trim().isNotEmpty ?? false),
-          'calendar_url': sourceCard.calendarUrl?.trim().isEmpty == true
-              ? null
-              : sourceCard.calendarUrl,
-        })
-        .inFilter('id', cardIds);
-  }
-
-  static List<String> _normalizedCardIds(List<String> cardIds) {
-    return cardIds
-        .map((id) => id.trim())
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList();
   }
 
   static String _eventLinkKey({
@@ -543,38 +626,43 @@ class AdminRepository {
 
     if (cardIds.isEmpty) return resolved;
 
-    if (contactItemIds.isNotEmpty) {
-      final contactRows = await _db
-          .from('contact_items')
-          .select('id, card_id, type, label')
-          .inFilter('card_id', cardIds)
-          .inFilter('id', contactItemIds);
-      for (final row in (contactRows as List).cast<Map<String, dynamic>>()) {
-        final id = row['id'] as String?;
-        if (id == null) continue;
-        final item = ContactItemModel.fromJson(row);
-        resolved['contact:$id'] = _ResolvedLinkReference(
-          label: item.displayLabel,
-          platform: item.type.name,
-        );
-      }
+    // contact_items and social_links are independent lookups — fetch both
+    // at once instead of one after the other.
+    final results = await Future.wait<dynamic>([
+      contactItemIds.isEmpty
+          ? Future.value(const [])
+          : _db
+                .from('contact_items')
+                .select('id, card_id, type, label')
+                .inFilter('card_id', cardIds)
+                .inFilter('id', contactItemIds),
+      socialLinkIds.isEmpty
+          ? Future.value(const [])
+          : _db
+                .from('social_links')
+                .select('id, card_id, platform, custom_label')
+                .inFilter('card_id', cardIds)
+                .inFilter('id', socialLinkIds),
+    ]);
+
+    for (final row in (results[0] as List).cast<Map<String, dynamic>>()) {
+      final id = row['id'] as String?;
+      if (id == null) continue;
+      final item = ContactItemModel.fromJson(row);
+      resolved['contact:$id'] = _ResolvedLinkReference(
+        label: item.displayLabel,
+        platform: item.type.name,
+      );
     }
 
-    if (socialLinkIds.isNotEmpty) {
-      final socialRows = await _db
-          .from('social_links')
-          .select('id, card_id, platform, custom_label')
-          .inFilter('card_id', cardIds)
-          .inFilter('id', socialLinkIds);
-      for (final row in (socialRows as List).cast<Map<String, dynamic>>()) {
-        final id = row['id'] as String?;
-        if (id == null) continue;
-        final link = SocialLinkModel.fromJson(row);
-        resolved['social:$id'] = _ResolvedLinkReference(
-          label: link.label,
-          platform: link.platform.name,
-        );
-      }
+    for (final row in (results[1] as List).cast<Map<String, dynamic>>()) {
+      final id = row['id'] as String?;
+      if (id == null) continue;
+      final link = SocialLinkModel.fromJson(row);
+      resolved['social:$id'] = _ResolvedLinkReference(
+        label: link.label,
+        platform: link.platform.name,
+      );
     }
 
     return resolved;
@@ -639,5 +727,12 @@ class AdminRepository {
         .from('organizations')
         .update({'company_logo': companyLogo})
         .eq('id', orgId);
+  }
+
+  static Future<void> updateOrgName({
+    required String orgId,
+    required String name,
+  }) async {
+    await _db.from('organizations').update({'name': name}).eq('id', orgId);
   }
 }

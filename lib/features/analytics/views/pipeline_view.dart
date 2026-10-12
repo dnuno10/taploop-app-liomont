@@ -8,6 +8,7 @@ import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/lead_repository.dart';
 import '../../../core/services/metrics_realtime_service.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../../core/widgets/taploop_toast.dart';
 import '../models/lead_model.dart';
@@ -310,8 +311,10 @@ class _PipelineHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Pipeline',
+          HelpTitle(
+            title: 'Pipeline',
+            helpText:
+                'Organiza y da seguimiento a las oportunidades generadas desde tus tarjetas.',
             style: GoogleFonts.outfit(
               fontSize: 32,
               fontWeight: FontWeight.w800,
@@ -557,8 +560,9 @@ class _SectionLabel extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            child: Text(
-              label,
+            child: HelpTitle(
+              title: label,
+              helpText: 'Lista de leads en la etapa $label.',
               style: GoogleFonts.dmSans(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,

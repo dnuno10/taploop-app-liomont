@@ -12,6 +12,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../core/widgets/empty_data_state.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../models/lead_model.dart';
 import '../models/team_member_model.dart';
@@ -200,8 +201,10 @@ class _TeamPerformanceViewState extends State<TeamPerformanceView> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Equipo',
+                    HelpTitle(
+                      title: 'Equipo',
+                      helpText:
+                          'Panel para gestionar miembros y comparar rendimiento del equipo.',
                       style: GoogleFonts.outfit(
                         fontSize: isDesktop ? 42 : 30,
                         fontWeight: FontWeight.w800,
@@ -460,8 +463,10 @@ class _TeamDirectoryPanel extends StatelessWidget {
               Icon(Icons.groups_2_outlined, color: AppColors.primary, size: 22),
               const SizedBox(width: 12),
               Expanded(
-                child: Text(
-                  'Directorio del equipo',
+                child: HelpTitle(
+                  title: 'Directorio del equipo',
+                  helpText:
+                      'Listado de miembros activos, roles, tarjetas y estado operativo.',
                   style: GoogleFonts.outfit(
                     fontSize: 23,
                     fontWeight: FontWeight.w800,
@@ -521,12 +526,30 @@ class _TeamDirectoryHeader extends StatelessWidget {
     );
     return Row(
       children: [
-        Expanded(flex: 34, child: Text('Miembro', style: style)),
-        Expanded(flex: 13, child: Text('Rol', style: style)),
-        Expanded(flex: 11, child: Text('Perfiles', style: style)),
-        Expanded(flex: 11, child: Text('Tarjetas', style: style)),
-        Expanded(flex: 18, child: Text('Última actividad', style: style)),
-        Expanded(flex: 13, child: Text('Estado', style: style)),
+        Expanded(
+          flex: 34,
+          child: HelpTitle(title: 'Miembro', style: style),
+        ),
+        Expanded(
+          flex: 13,
+          child: HelpTitle(title: 'Rol', style: style),
+        ),
+        Expanded(
+          flex: 11,
+          child: HelpTitle(title: 'Perfiles', style: style),
+        ),
+        Expanded(
+          flex: 11,
+          child: HelpTitle(title: 'Tarjetas', style: style),
+        ),
+        Expanded(
+          flex: 18,
+          child: HelpTitle(title: 'Última actividad', style: style),
+        ),
+        Expanded(
+          flex: 13,
+          child: HelpTitle(title: 'Estado', style: style),
+        ),
       ],
     );
   }
@@ -1153,9 +1176,18 @@ class _ExplorerHeaderRow extends StatelessWidget {
 
     return Row(
       children: [
-        Expanded(flex: 6, child: Text('MIEMBRO', style: style)),
-        Expanded(flex: 2, child: Text('LEADS', style: style)),
-        Expanded(flex: 2, child: Text('CLICKS', style: style)),
+        Expanded(
+          flex: 6,
+          child: HelpTitle(title: 'MIEMBRO', style: style),
+        ),
+        Expanded(
+          flex: 2,
+          child: HelpTitle(title: 'LEADS', style: style),
+        ),
+        Expanded(
+          flex: 2,
+          child: HelpTitle(title: 'CLICKS', style: style),
+        ),
       ],
     );
   }
@@ -1376,8 +1408,10 @@ class _TeamLeaderPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Resumen ejecutivo',
+        HelpTitle(
+          title: 'Resumen ejecutivo',
+          helpText:
+              'Lectura rápida del rendimiento global y del miembro con más tracción.',
           style: GoogleFonts.outfit(
             fontSize: 18,
             fontWeight: FontWeight.w800,
@@ -2183,8 +2217,9 @@ class _MemberSectionPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
+          HelpTitle(
+            title: title,
+            helpText: subtitle,
             style: GoogleFonts.outfit(
               fontSize: 15,
               fontWeight: FontWeight.w800,
@@ -2221,8 +2256,14 @@ class _LeadListHeader extends StatelessWidget {
 
     return Row(
       children: [
-        Expanded(flex: 5, child: Text('LEAD', style: style)),
-        Expanded(flex: 3, child: Text('SEÑALES', style: style)),
+        Expanded(
+          flex: 5,
+          child: HelpTitle(title: 'LEAD', style: style),
+        ),
+        Expanded(
+          flex: 3,
+          child: HelpTitle(title: 'SEÑALES', style: style),
+        ),
       ],
     );
   }

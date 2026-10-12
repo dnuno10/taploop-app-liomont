@@ -6,6 +6,7 @@ import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/lead_repository.dart';
 import '../../../core/services/metrics_realtime_service.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../../core/widgets/taploop_toast.dart';
 import '../models/lead_model.dart';
@@ -159,8 +160,10 @@ class _SalesOutcomeViewState extends State<SalesOutcomeView> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'Ventas',
+                HelpTitle(
+                  title: 'Ventas',
+                  helpText:
+                      'Seguimiento de leads convertidos y cierres confirmados.',
                   style: GoogleFonts.outfit(
                     fontSize: 28,
                     fontWeight: FontWeight.w800,
@@ -310,8 +313,9 @@ class _MetricBlock extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
+          HelpTitle(
+            title: label,
+            helpText: 'Indicador de ventas para $label.',
             style: GoogleFonts.dmSans(fontSize: 11, color: context.textMuted),
           ),
           const SizedBox(height: 4),

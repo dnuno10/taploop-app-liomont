@@ -5,6 +5,7 @@ import '../../../core/data/app_state.dart';
 import '../../../core/services/auth_service.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme_extensions.dart';
+import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_button.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../../core/widgets/taploop_text_field.dart';
@@ -345,8 +346,9 @@ class _SettingsSection extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
+          HelpTitle(
+            title: title,
+            helpText: 'Agrupa las opciones relacionadas con $title.',
             style: GoogleFonts.outfit(
               fontSize: 18,
               fontWeight: FontWeight.w800,

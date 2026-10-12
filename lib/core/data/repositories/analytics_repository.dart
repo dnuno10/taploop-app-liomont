@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../services/supabase_service.dart';
+import '../../utils/request_deduper.dart';
 import '../../utils/visitor_info.dart';
 import '../../../features/analytics/models/analytics_summary_model.dart';
 import '../../../features/analytics/models/visit_event_model.dart';
@@ -67,6 +68,20 @@ class AnalyticsRepository {
     List<String> cardIds, {
     DateTime? from,
     DateTime? to,
+  }) {
+    // The dashboard summary (and its realtime-triggered refresh) can be
+    // requested for the same cards+range from more than one place at once —
+    // coalesce overlapping calls into a single round trip.
+    final sortedIds = [...cardIds]..sort();
+    final key =
+        'fetchSummary:${sortedIds.join(',')}:${from?.toIso8601String()}:${to?.toIso8601String()}';
+    return RequestDeduper.run(key, () => _fetchSummaryForCardIdsUncached(cardIds, from: from, to: to));
+  }
+
+  static Future<AnalyticsSummaryModel> _fetchSummaryForCardIdsUncached(
+    List<String> cardIds, {
+    DateTime? from,
+    DateTime? to,
   }) async {
     final now = DateTime.now();
     final rangeEnd = to != null
@@ -104,17 +119,23 @@ class AnalyticsRepository {
       );
     }
 
-    // All visit events
+    // Only events from prevStart onward are ever used below (current period
+    // + the previous period used for the week-over-week comparison), so
+    // bound the query instead of downloading the card's entire history
+    // every time the dashboard loads.
+    final prevStartIso = prevStart.toIso8601String();
     final allEvents = uniqueCardIds.length == 1
         ? await _db
               .from('visit_events')
               .select()
               .eq('card_id', uniqueCardIds.first)
+              .gte('timestamp', prevStartIso)
               .order('timestamp', ascending: false)
         : await _db
               .from('visit_events')
               .select()
               .inFilter('card_id', uniqueCardIds)
+              .gte('timestamp', prevStartIso)
               .order('timestamp', ascending: false);
 
     final events = (allEvents as List)
@@ -229,6 +250,18 @@ class AnalyticsRepository {
   }
 
   static Future<List<VisitEventModel>> fetchRecentEventsForCards(
+    List<String> cardIds, {
+    int limit = 20,
+  }) {
+    final sortedIds = [...cardIds]..sort();
+    final key = 'fetchRecentEventsForCards:${sortedIds.join(',')}:$limit';
+    return RequestDeduper.run(
+      key,
+      () => _fetchRecentEventsForCardsUncached(cardIds, limit: limit),
+    );
+  }
+
+  static Future<List<VisitEventModel>> _fetchRecentEventsForCardsUncached(
     List<String> cardIds, {
     int limit = 20,
   }) async {

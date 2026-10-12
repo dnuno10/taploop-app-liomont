@@ -244,11 +244,17 @@ class _TapLoopAnimatedIndexedStackState
   late int _currentIndex;
   int? _previousIndex;
   int _direction = 1;
+  // Indices whose child has been shown at least once. A child is only built
+  // (and therefore only has its State's initState()/data fetches fire) the
+  // first time its index becomes current — tabs the user never visits stay
+  // unbuilt instead of all mounting eagerly on the very first frame.
+  late final Set<int> _mountedIndices;
 
   @override
   void initState() {
     super.initState();
     _currentIndex = widget.index;
+    _mountedIndices = {widget.index};
     _controller = AnimationController(vsync: this, duration: widget.duration)
       ..value = 1;
     _controller.addStatusListener((status) {
@@ -268,6 +274,7 @@ class _TapLoopAnimatedIndexedStackState
       _direction = widget.index > _currentIndex ? 1 : -1;
       _previousIndex = _currentIndex;
       _currentIndex = widget.index;
+      _mountedIndices.add(widget.index);
       _controller.forward(from: 0);
     }
   }
@@ -296,6 +303,12 @@ class _TapLoopAnimatedIndexedStackState
   }
 
   Widget _buildLayer(int index, double progress) {
+    if (!_mountedIndices.contains(index)) {
+      // Never visited: skip building this tab's subtree entirely so its
+      // initState()/data fetches don't fire until the user navigates to it.
+      return const SizedBox.shrink();
+    }
+
     final isCurrent = index == _currentIndex;
     final isPrevious = index == _previousIndex;
     final shouldPaint = isCurrent || isPrevious;

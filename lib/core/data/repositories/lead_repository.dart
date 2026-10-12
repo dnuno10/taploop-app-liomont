@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../services/supabase_service.dart';
+import '../../utils/request_deduper.dart';
 import '../../../features/analytics/models/lead_model.dart';
 import '../../../features/analytics/models/visit_event_model.dart';
 import 'analytics_repository.dart';
@@ -27,7 +28,19 @@ class LeadRepository {
 
   // ─── Fetch leads for a card ───────────────────────────────────────────────
 
-  static Future<List<LeadModel>> fetchLeadsForCard(String cardId) async {
+  static Future<List<LeadModel>> fetchLeadsForCard(String cardId) {
+    // PipelineView and SalesOutcomeView both call this for the same card
+    // and both stay mounted once visited, so a single realtime event can
+    // trigger both at once — coalesce overlapping calls.
+    return RequestDeduper.run(
+      'fetchLeadsForCard:$cardId',
+      () => _fetchLeadsForCardUncached(cardId),
+    );
+  }
+
+  static Future<List<LeadModel>> _fetchLeadsForCardUncached(
+    String cardId,
+  ) async {
     final rows = await _db
         .from('leads')
         .select()
@@ -56,23 +69,34 @@ class LeadRepository {
     final inferredByLead = _inferActionsByLead(leads, visitEvents);
 
     // Enrich each lead with DB actions and inferred visit-event actions.
-    final hydrated = await Future.wait(
-      leads.map((lead) async {
-        try {
-          final dbActions = await fetchActions(lead.id);
-          final inferredActions = inferredByLead[lead.id] ?? const [];
-          final merged = _mergeActions(dbActions, inferredActions);
-          return lead.copyWith(actions: merged);
-        } catch (_) {
-          return lead.copyWith(actions: inferredByLead[lead.id] ?? const []);
-        }
-      }),
-    );
+    Map<String, List<LeadActionEvent>> dbActionsByLead = const {};
+    try {
+      dbActionsByLead = await _fetchActionsForLeads(
+        leads.map((lead) => lead.id).toList(),
+      );
+    } catch (_) {
+      dbActionsByLead = const {};
+    }
 
-    return hydrated;
+    return leads.map((lead) {
+      final dbActions = dbActionsByLead[lead.id] ?? const <LeadActionEvent>[];
+      final inferredActions = inferredByLead[lead.id] ?? const [];
+      final merged = _mergeActions(dbActions, inferredActions);
+      return lead.copyWith(actions: merged);
+    }).toList();
   }
 
   static Future<List<LeadModel>> fetchDashboardLeadsForCard(
+    String cardId, {
+    int limit = 6,
+  }) {
+    return RequestDeduper.run(
+      'fetchDashboardLeadsForCard:$cardId:$limit',
+      () => _fetchDashboardLeadsForCardUncached(cardId, limit: limit),
+    );
+  }
+
+  static Future<List<LeadModel>> _fetchDashboardLeadsForCardUncached(
     String cardId, {
     int limit = 6,
   }) async {
@@ -140,24 +164,27 @@ class LeadRepository {
       eventsByCard.putIfAbsent(cardId, () => []).add(event);
     }
 
+    Map<String, List<LeadActionEvent>> dbActionsByLead = const {};
+    try {
+      dbActionsByLead = await _fetchActionsForLeads(
+        leads.map((lead) => lead.id).toList(),
+      );
+    } catch (_) {
+      dbActionsByLead = const {};
+    }
+
     final result = <String, List<LeadModel>>{};
     for (final entry in byCard.entries) {
       final cardLeads = entry.value;
       final cardEvents = eventsByCard[entry.key] ?? const <VisitEventModel>[];
       final inferredByLead = _inferActionsByLead(cardLeads, cardEvents);
-      final hydrated = await Future.wait(
-        cardLeads.map((lead) async {
-          try {
-            final dbActions = await fetchActions(lead.id);
-            final inferredActions = inferredByLead[lead.id] ?? const [];
-            final merged = _mergeActions(dbActions, inferredActions);
-            return lead.copyWith(actions: merged);
-          } catch (_) {
-            return lead.copyWith(actions: inferredByLead[lead.id] ?? const []);
-          }
-        }),
-      );
-      result[entry.key] = hydrated;
+      result[entry.key] = cardLeads.map((lead) {
+        final dbActions =
+            dbActionsByLead[lead.id] ?? const <LeadActionEvent>[];
+        final inferredActions = inferredByLead[lead.id] ?? const [];
+        final merged = _mergeActions(dbActions, inferredActions);
+        return lead.copyWith(actions: merged);
+      }).toList();
     }
 
     return result;
@@ -174,6 +201,30 @@ class LeadRepository {
     return (rows as List)
         .map((e) => LeadActionEvent.fromJson(e as Map<String, dynamic>))
         .toList();
+  }
+
+  /// Batched version of [fetchActions]: resolves the action timeline for
+  /// every lead in [leadIds] with a single query instead of one query per
+  /// lead.
+  static Future<Map<String, List<LeadActionEvent>>> _fetchActionsForLeads(
+    List<String> leadIds,
+  ) async {
+    final ids = leadIds.toSet().toList();
+    if (ids.isEmpty) return const {};
+
+    final rows = await _db
+        .from('lead_actions')
+        .select()
+        .inFilter('lead_id', ids)
+        .order('timestamp');
+
+    final byLead = <String, List<LeadActionEvent>>{};
+    for (final row in (rows as List).cast<Map<String, dynamic>>()) {
+      final leadId = row['lead_id'] as String?;
+      if (leadId == null) continue;
+      byLead.putIfAbsent(leadId, () => []).add(LeadActionEvent.fromJson(row));
+    }
+    return byLead;
   }
 
   static Map<String, List<LeadActionEvent>> _inferActionsByLead(

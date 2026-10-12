@@ -1,4 +1,5 @@
 import '../../services/supabase_service.dart';
+import '../../utils/request_deduper.dart';
 import '../../../features/card/models/digital_card_model.dart';
 import '../../../features/card/models/contact_item_model.dart';
 import '../../../features/card/models/social_link_model.dart';
@@ -143,6 +144,44 @@ class CardRepository {
       rows.first,
       includeOrganizationLogo: includeOrganizationLogo,
     );
+  }
+
+  /// Combines what [checkNfcSerial] + [fetchByNfcSerial] do into a single
+  /// `nfc_cards` lookup (it already stores `digital_card_id`), skipping the
+  /// separate status check and the `get_digital_card_id_by_nfc_serial` RPC
+  /// round trip on the public-card hot path.
+  static Future<({String status, DigitalCardModel? card})> resolveNfcSerial(
+    String serial, {
+    bool includeOrganizationLogo = true,
+  }) async {
+    final rows = await _db
+        .from('nfc_cards')
+        .select('is_assigned, digital_card_id')
+        .eq('serial', serial)
+        .limit(1);
+    if ((rows as List).isEmpty) {
+      return (status: 'not_found', card: null);
+    }
+    final row = rows.first;
+    final isAssigned = row['is_assigned'] as bool? ?? false;
+    final cardId = (row['digital_card_id'] as String?)?.trim();
+    if (!isAssigned || cardId == null || cardId.isEmpty) {
+      return (status: 'unassigned', card: null);
+    }
+
+    final cardRows = await _db
+        .from('digital_cards')
+        .select()
+        .eq('id', cardId)
+        .limit(1);
+    if ((cardRows as List).isEmpty) {
+      return (status: 'unassigned', card: null);
+    }
+    final card = await _fetchWithItems(
+      cardRows.first,
+      includeOrganizationLogo: includeOrganizationLogo,
+    );
+    return (status: 'assigned', card: card);
   }
 
   // ─── Activate NFC card (link serial → current user) ──────────────────────
@@ -345,6 +384,145 @@ class CardRepository {
     return '$normalized-$suffix';
   }
 
+  // ─── Public slug (the part of the share link after the domain) ───────────
+
+  static final RegExp slugPattern = RegExp(r'^[a-z0-9]+(-[a-z0-9]+)*$');
+
+  /// `public_slug` has no DB-level unique constraint, so callers MUST check
+  /// this before writing a user-chosen slug to avoid two cards silently
+  /// sharing the same public link.
+  static Future<bool> isSlugAvailable(
+    String slug, {
+    required String excludingCardId,
+  }) async {
+    final rows = await _db
+        .from('digital_cards')
+        .select('id')
+        .eq('public_slug', slug)
+        .limit(2);
+    final matches = (rows as List).cast<Map<String, dynamic>>();
+    return matches.every((row) => row['id'] == excludingCardId);
+  }
+
+  static Future<void> updateSlug({
+    required String cardId,
+    required String slug,
+  }) async {
+    await _db
+        .from('digital_cards')
+        .update({'public_slug': slug})
+        .eq('id', cardId);
+  }
+
+  // ─── Shared template resolution (org-wide design/forms/integrations/links) ─
+  //
+  // An org can designate one member's card as a "template". While a given
+  // toggle is on, every OTHER member's public card reads that aspect from
+  // the template instead of their own row — nothing is ever copied into or
+  // deleted from a member's own data, so turning a toggle off instantly
+  // restores whatever that member had before, because it was never touched.
+  //
+  // This resolution only happens in [_fetchWithItems] (the public/display
+  // fetch path: fetchBySlug/fetchByUserId/fetchByNfcSerial/resolveNfcSerial)
+  // and in [fetchSmartFormsForDisplay]. It deliberately does NOT happen in
+  // [buildCardModel]/[fetchCard]/[fetchCardsForUser], which is what feeds
+  // `appState.currentCard` for the member's own editor — editors must always
+  // see+edit the member's real stored data, never the template's.
+
+  static const _sharedDesignColumns = [
+    'theme_style',
+    'layout_style',
+    'profile_design',
+    'primary_color',
+    'icon_color',
+    'background_color_start',
+    'background_color_end',
+    'bg_style',
+    'bg_color',
+    'bg_color_end',
+    'show_verified_badge',
+  ];
+
+  static Future<Map<String, dynamic>?> _fetchSharedOrgSettings(
+    String? orgId,
+  ) async {
+    final id = orgId?.trim();
+    if (id == null || id.isEmpty) return null;
+    return RequestDeduper.run('sharedOrgSettings:$id', () async {
+      final rows = await _db
+          .from('organizations')
+          .select(
+            'shared_design_enabled, shared_forms_enabled, '
+            'shared_integrations_enabled, shared_links_enabled, '
+            'shared_template_card_id',
+          )
+          .eq('id', id)
+          .limit(1);
+      final list = (rows as List).cast<Map<String, dynamic>>();
+      return list.isEmpty ? null : list.first;
+    });
+  }
+
+  /// Public, read-only view of an org's shared-template settings, for
+  /// editors (EditCardView, the admin's member dialog) to decide whether a
+  /// tab should show as locked/"managed by your organization" instead of
+  /// editable — it does not overlay/resolve anything on its own.
+  static Future<
+    ({
+      bool designShared,
+      bool formsShared,
+      bool integrationsShared,
+      bool linksShared,
+      String? templateCardId,
+    })?
+  >
+  fetchSharedTemplateSettings(String? orgId) async {
+    final raw = await _fetchSharedOrgSettings(orgId);
+    if (raw == null) return null;
+    return (
+      designShared: raw['shared_design_enabled'] as bool? ?? false,
+      formsShared: raw['shared_forms_enabled'] as bool? ?? false,
+      integrationsShared: raw['shared_integrations_enabled'] as bool? ?? false,
+      linksShared: raw['shared_links_enabled'] as bool? ?? false,
+      templateCardId: (raw['shared_template_card_id'] as String?)?.trim(),
+    );
+  }
+
+  static Future<Map<String, dynamic>?> _fetchTemplateCardRow(
+    String templateCardId,
+  ) {
+    return RequestDeduper.run('templateCardRow:$templateCardId', () async {
+      final rows = await _db
+          .from('digital_cards')
+          .select()
+          .eq('id', templateCardId)
+          .limit(1);
+      final list = (rows as List).cast<Map<String, dynamic>>();
+      return list.isEmpty ? null : list.first;
+    });
+  }
+
+  /// Resolved version of [fetchSmartForms] for public/display use: if the
+  /// card's org has shared forms enabled and this card isn't the template
+  /// itself, returns the template's forms instead.
+  static Future<List<SmartFormModel>> fetchSmartFormsForDisplay({
+    required String cardId,
+    String? orgId,
+  }) async {
+    final shared = await _fetchSharedOrgSettings(orgId);
+    final templateCardId = (shared?['shared_template_card_id'] as String?)
+        ?.trim();
+    final formsShared = shared?['shared_forms_enabled'] as bool? ?? false;
+    final effectiveCardId =
+        formsShared &&
+            templateCardId != null &&
+            templateCardId.isNotEmpty &&
+            templateCardId != cardId
+        ? templateCardId
+        : cardId;
+    return fetchSmartForms(effectiveCardId);
+  }
+
   // ─── Shared helper ────────────────────────────────────────────────────────
 
   static Future<DigitalCardModel> _fetchWithItems(
@@ -352,6 +530,43 @@ class CardRepository {
     bool includeOrganizationLogo = true,
   }) async {
     final cardId = cardJson['id'] as String;
+    final orgId = (cardJson['org_id'] as String?)?.trim();
+
+    var effectiveCardJson = cardJson;
+    var linksCardId = cardId;
+
+    final shared = await _fetchSharedOrgSettings(orgId);
+    final templateCardId = (shared?['shared_template_card_id'] as String?)
+        ?.trim();
+    if (shared != null &&
+        templateCardId != null &&
+        templateCardId.isNotEmpty &&
+        templateCardId != cardId) {
+      final designShared = shared['shared_design_enabled'] as bool? ?? false;
+      final integrationsShared =
+          shared['shared_integrations_enabled'] as bool? ?? false;
+      final linksShared = shared['shared_links_enabled'] as bool? ?? false;
+
+      if (designShared || integrationsShared) {
+        final templateRow = await _fetchTemplateCardRow(templateCardId);
+        if (templateRow != null) {
+          effectiveCardJson = Map<String, dynamic>.from(cardJson);
+          if (designShared) {
+            for (final key in _sharedDesignColumns) {
+              effectiveCardJson[key] = templateRow[key];
+            }
+          }
+          if (integrationsShared) {
+            effectiveCardJson['calendar_enabled'] =
+                templateRow['calendar_enabled'];
+            effectiveCardJson['calendar_url'] = templateRow['calendar_url'];
+          }
+        }
+      }
+      if (linksShared) {
+        linksCardId = templateCardId;
+      }
+    }
 
     final contactsFuture = _db
         .from('contact_items')
@@ -363,7 +578,7 @@ class CardRepository {
     final socialsFuture = _db
         .from('social_links')
         .select()
-        .eq('card_id', cardId)
+        .eq('card_id', linksCardId)
         .eq('is_visible', true)
         .order('sort_order');
 
@@ -372,7 +587,7 @@ class CardRepository {
     final socials = results[1] as List;
 
     return buildCardModel(
-      cardJson,
+      effectiveCardJson,
       includeOrganizationLogo: includeOrganizationLogo,
       contactItems: contacts
           .map((e) => ContactItemModel.fromJson(e as Map<String, dynamic>))
@@ -680,14 +895,16 @@ class CardRepository {
     }
   }
 
-  static Future<void> reorderContactItems(List<ContactItemModel> items) async {
-    for (var i = 0; i < items.length; i++) {
-      await _db
-          .from('contact_items')
-          .update({'sort_order': i})
-          .eq('id', items[i].id)
-          .select('id');
-    }
+  static Future<void> reorderContactItems(
+    String cardId,
+    List<ContactItemModel> items,
+  ) async {
+    if (items.isEmpty) return;
+    final payload = [
+      for (var i = 0; i < items.length; i++)
+        {'id': items[i].id, ...items[i].toJson(cardId: cardId), 'sort_order': i},
+    ];
+    await _db.from('contact_items').upsert(payload);
   }
 
   // ─── Social links ─────────────────────────────────────────────────────────
@@ -740,14 +957,16 @@ class CardRepository {
     }
   }
 
-  static Future<void> reorderSocialLinks(List<SocialLinkModel> links) async {
-    for (var i = 0; i < links.length; i++) {
-      await _db
-          .from('social_links')
-          .update({'sort_order': i})
-          .eq('id', links[i].id)
-          .select('id');
-    }
+  static Future<void> reorderSocialLinks(
+    String cardId,
+    List<SocialLinkModel> links,
+  ) async {
+    if (links.isEmpty) return;
+    final payload = [
+      for (var i = 0; i < links.length; i++)
+        {'id': links[i].id, ...links[i].toJson(cardId: cardId), 'sort_order': i},
+    ];
+    await _db.from('social_links').upsert(payload);
   }
 
   static bool _isMissingDeleteContactItemRpc(Object error) {
