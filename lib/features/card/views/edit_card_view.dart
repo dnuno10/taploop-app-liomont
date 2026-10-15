@@ -486,10 +486,9 @@ class _EditCardViewState extends State<EditCardView>
             onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Mantener enlace actual'),
           ),
-          FilledButton(
+          _OrangeGradientButton(
+            label: 'Actualizar enlace',
             onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
-            child: const Text('Actualizar enlace'),
           ),
         ],
       ),
@@ -1976,6 +1975,65 @@ class _ProfileTabState extends State<_ProfileTab> {
               ),
               const SizedBox(height: 48),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pill button with the same orange gradient as "Guardar cambios".
+class _OrangeGradientButton extends StatefulWidget {
+  final String label;
+  final VoidCallback onPressed;
+
+  const _OrangeGradientButton({required this.label, required this.onPressed});
+
+  @override
+  State<_OrangeGradientButton> createState() => _OrangeGradientButtonState();
+}
+
+class _OrangeGradientButtonState extends State<_OrangeGradientButton> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onPressed,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: _hovered
+                  ? const [Color(0xFFFF6A2A), Color(0xFFFF9A52)]
+                  : const [Color(0xFFFF5A1F), Color(0xFFFF8A3D)],
+              begin: Alignment.centerLeft,
+              end: Alignment.centerRight,
+            ),
+            borderRadius: BorderRadius.circular(999),
+            boxShadow: _hovered
+                ? [
+                    BoxShadow(
+                      color: AppColors.primary.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                      offset: const Offset(0, 8),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Text(
+            widget.label,
+            style: GoogleFonts.dmSans(
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+              color: Colors.white,
+            ),
           ),
         ),
       ),

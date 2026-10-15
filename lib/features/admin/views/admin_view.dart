@@ -3243,12 +3243,11 @@ class _TeamProfileRow extends StatelessWidget {
                 _AdminMemberAvatar(member: member, size: 58),
                 const SizedBox(width: 16),
                 Expanded(
-                  child: Text(
+                  child: _HoverFullText(
                     member.card.name.trim().isNotEmpty
                         ? member.card.name
                         : member.member.name,
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
                     style: GoogleFonts.dmSans(
                       fontSize: 17,
                       fontWeight: FontWeight.w900,
@@ -3264,12 +3263,11 @@ class _TeamProfileRow extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                _HoverFullText(
                   member.card.jobTitle.trim().isNotEmpty
                       ? member.card.jobTitle
                       : 'Sin cargo',
                   maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.dmSans(
                     fontSize: 16,
                     fontWeight: FontWeight.w900,
@@ -3277,7 +3275,7 @@ class _TeamProfileRow extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(
+                _HoverFullText(
                   [
                     if (member.orgName.trim().isNotEmpty)
                       member.orgName.trim()
@@ -3289,7 +3287,6 @@ class _TeamProfileRow extends StatelessWidget {
                     ...member.nfcSerials.map((serial) => 'NFC $serial'),
                   ].join(' · '),
                   maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.dmSans(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
@@ -3415,6 +3412,44 @@ class _TeamProfileRow extends StatelessWidget {
   }
 }
 
+/// Text that ellipsizes in a table cell and, only when it is actually cut
+/// off, shows its full value in a tooltip on hover.
+class _HoverFullText extends StatelessWidget {
+  final String text;
+  final TextStyle style;
+  final int maxLines;
+
+  const _HoverFullText(this.text, {required this.style, this.maxLines = 1});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final label = Text(
+          text,
+          maxLines: maxLines,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+        final painter = TextPainter(
+          text: TextSpan(text: text, style: style),
+          maxLines: maxLines,
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: constraints.maxWidth);
+        final truncated = painter.didExceedMaxLines;
+        painter.dispose();
+        if (!truncated) return label;
+        return Tooltip(
+          message: text,
+          waitDuration: const Duration(milliseconds: 250),
+          child: MouseRegion(cursor: SystemMouseCursors.help, child: label),
+        );
+      },
+    );
+  }
+}
+
 /// Public profile URL in the team list: opens the member's public profile,
 /// with a pointer cursor and underline on hover.
 class _PublicProfileLink extends StatefulWidget {
@@ -3433,7 +3468,8 @@ class _PublicProfileLinkState extends State<_PublicProfileLink> {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: 'Abrir perfil público',
+      message: '${widget.url}\nClic para abrir el perfil público',
+      waitDuration: const Duration(milliseconds: 250),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         onEnter: (_) => setState(() => _hovered = true),
