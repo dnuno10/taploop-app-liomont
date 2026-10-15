@@ -91,6 +91,10 @@ class _EditCardViewState extends State<EditCardView>
 
   bool get _isOverride => widget.overrideCard != null;
 
+  /// Name as last saved, to detect a rename when the admin saves a
+  /// collaborator (and offer to update their public link).
+  String _savedName = '';
+
   @override
   void initState() {
     super.initState();
@@ -113,6 +117,7 @@ class _EditCardViewState extends State<EditCardView>
             publicSlug: '',
           );
     }
+    _savedName = _card.name.trim();
     _nameCtrl = TextEditingController(text: _card.name);
     _titleCtrl = TextEditingController(text: _card.jobTitle);
     _companyCtrl = TextEditingController(text: _card.company);
@@ -394,6 +399,8 @@ class _EditCardViewState extends State<EditCardView>
     try {
       await CardRepository.saveCard(_card);
       if (!_isOverride) appState.updateCard(_card);
+      final renamed = _card.name.trim() != _savedName;
+      _savedName = _card.name.trim();
       if (mounted) {
         setState(() {
           _saving = false;
@@ -405,6 +412,9 @@ class _EditCardViewState extends State<EditCardView>
           TapLoopToastType.success,
         );
       }
+      if (mounted && _isOverride && renamed) {
+        await _offerPublicSlugUpdate();
+      }
     } catch (_) {
       if (mounted) {
         setState(() => _saving = false);
@@ -415,6 +425,112 @@ class _EditCardViewState extends State<EditCardView>
         );
       }
     }
+  }
+
+  /// Admin editing a collaborator renamed them: ask before changing their
+  /// public link to match the new name (old links/QRs stop working).
+  Future<void> _offerPublicSlugUpdate() async {
+    final name = _card.name.trim();
+    if (name.isEmpty || _card.id.isEmpty) return;
+    if (CardRepository.slugFromName(name) == _card.publicSlug) return;
+
+    final String proposed;
+    try {
+      proposed = await CardRepository.availableSlugForName(
+        name,
+        cardId: _card.id,
+      );
+    } catch (_) {
+      return;
+    }
+    if (!mounted || proposed == _card.publicSlug) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: ctx.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          '¿Deseas actualizar el enlace público del colaborador?',
+          style: GoogleFonts.outfit(fontWeight: FontWeight.w800),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'El nombre cambió a "$name".',
+              style: GoogleFonts.dmSans(color: ctx.textSecondary),
+            ),
+            const SizedBox(height: 14),
+            _SlugChangeLine(
+              label: 'Actual',
+              value: 'liomont.taploop.com.mx/${_card.publicSlug}',
+              muted: true,
+            ),
+            const SizedBox(height: 6),
+            _SlugChangeLine(
+              label: 'Nuevo',
+              value: 'liomont.taploop.com.mx/$proposed',
+            ),
+            const SizedBox(height: 14),
+            Text(
+              'Los QR impresos y enlaces ya compartidos con el enlace actual '
+              'dejarán de funcionar. Las tarjetas NFC siguen funcionando.',
+              style: GoogleFonts.dmSans(fontSize: 13, color: ctx.textSecondary),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Mantener enlace actual'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+            child: const Text('Actualizar enlace'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    // The availability check can't see every org's cards, so if the database
+    // still reports the slug as taken, try the next numbered variant.
+    var slug = proposed;
+    for (var attempt = 0; attempt < 5; attempt++) {
+      try {
+        await CardRepository.updateSlug(cardId: _card.id, slug: slug);
+        if (!mounted) return;
+        setState(() => _card = _card.copyWith(publicSlug: slug));
+        TapLoopToast.show(
+          context,
+          'Enlace público actualizado: liomont.taploop.com.mx/$slug',
+          TapLoopToastType.success,
+        );
+        return;
+      } catch (error) {
+        if (!error.toString().contains('slug_taken')) break;
+        final match = RegExp(r'-(\d+)$').firstMatch(slug);
+        final next = match == null ? 2 : int.parse(match.group(1)!) + 1;
+        try {
+          slug = await CardRepository.availableSlugForName(
+            name,
+            cardId: _card.id,
+            startSuffix: next,
+          );
+        } catch (_) {
+          break;
+        }
+      }
+    }
+    if (!mounted) return;
+    TapLoopToast.show(
+      context,
+      'No se pudo actualizar el enlace público. Intenta de nuevo.',
+      TapLoopToastType.warning,
+    );
   }
 
   Future<void> _handleProfilePhotoRemoved() async {
@@ -1863,6 +1979,49 @@ class _ProfileTabState extends State<_ProfileTab> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _SlugChangeLine extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool muted;
+
+  const _SlugChangeLine({
+    required this.label,
+    required this.value,
+    this.muted = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 56,
+          child: Text(
+            label,
+            style: GoogleFonts.dmSans(
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              color: context.textSecondary,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: GoogleFonts.dmSans(
+              fontSize: 14,
+              fontWeight: FontWeight.w800,
+              color: muted ? context.textSecondary : AppColors.primary,
+              decoration: muted ? TextDecoration.lineThrough : null,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

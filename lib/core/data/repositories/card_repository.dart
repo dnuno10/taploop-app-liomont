@@ -1,5 +1,6 @@
 import '../../services/supabase_service.dart';
 import 'linked_admin_gateway.dart';
+import '../../utils/search_text.dart';
 import '../../utils/request_deduper.dart';
 import '../../../features/card/models/digital_card_model.dart';
 import '../../../features/card/models/contact_item_model.dart';
@@ -408,6 +409,32 @@ class CardRepository {
         .limit(2);
     final matches = (rows as List).cast<Map<String, dynamic>>();
     return matches.every((row) => row['id'] == excludingCardId);
+  }
+
+  /// Slug for a person's name: accents transliterated (González → gonzalez),
+  /// anything else non-alphanumeric collapsed into single dashes.
+  static String slugFromName(String name) {
+    final slug = normalizeSearchText(
+      name,
+    ).replaceAll(RegExp(r'[^a-z0-9]+'), '-').replaceAll(RegExp(r'^-+|-+$'), '');
+    return slug.isEmpty ? 'usuario' : slug;
+  }
+
+  /// First free slug for [name] ("diego-rimoch", then "diego-rimoch-2", …),
+  /// ignoring [cardId]'s own current slug.
+  static Future<String> availableSlugForName(
+    String name, {
+    required String cardId,
+    int startSuffix = 1,
+  }) async {
+    final base = slugFromName(name);
+    for (var n = startSuffix; n < startSuffix + 50; n++) {
+      final candidate = n == 1 ? base : '$base-$n';
+      if (await isSlugAvailable(candidate, excludingCardId: cardId)) {
+        return candidate;
+      }
+    }
+    return '$base-${cardId.substring(0, 6)}';
   }
 
   static Future<void> updateSlug({
