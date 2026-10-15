@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'dart:typed_data';
-import 'package:csv/csv.dart';
 import 'package:file_saver/file_saver.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme_extensions.dart';
+import '../../../core/utils/liomont_report_pdf.dart';
+import '../../../core/utils/liomont_xlsx.dart';
 import '../../../core/utils/responsive.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/admin_repository.dart';
@@ -120,7 +120,10 @@ class _AnalyticsDashboardViewState extends State<AnalyticsDashboardView> {
       return;
     }
     try {
-      final members = orgId == null
+      // Only admins can see (and filter by) other collaborators; everyone
+      // else only ever loads their own card's data.
+      final isAdmin = appState.currentUser?.isAdmin == true;
+      final members = orgId == null || !isAdmin
           ? <TeamMemberModel>[]
           : await AdminRepository.fetchTeamMembers(orgId);
       final selectedMemberId = _resolveSelectedMemberId(
@@ -201,61 +204,117 @@ class _AnalyticsDashboardViewState extends State<AnalyticsDashboardView> {
     _load();
   }
 
-  Future<void> _exportCsv() async {
+  /// Who the exported report covers: the selected collaborator, the whole
+  /// team (admin, no filter) or the user's own card.
+  String _reportScopeLabel() {
+    final selectedId = _selectedMemberId;
+    if (selectedId != null) {
+      final member = _members.cast<TeamMemberModel?>().firstWhere(
+        (m) => m?.id == selectedId,
+        orElse: () => null,
+      );
+      if (member != null) return 'Colaborador: ${member.name}';
+    }
+    if (_members.isNotEmpty) return 'Todo el equipo';
+    final ownName = appState.currentCard?.name.trim().isNotEmpty == true
+        ? appState.currentCard!.name.trim()
+        : appState.currentUser?.name.trim() ?? '';
+    return ownName.isEmpty ? 'Mi tarjeta' : ownName;
+  }
+
+  String get _reportRangeLabel =>
+      'Periodo: ${formatReportDate(_range.start)} - ${formatReportDate(_range.end)}';
+
+  /// Report tables shared by the PDF and Excel downloads.
+  List<XlsxSection> _reportSections(AnalyticsSummaryModel analytics) {
+    return [
+      XlsxSection(
+        title: 'Indicadores',
+        headers: const ['Indicador', 'Valor'],
+        rows: [
+          ['Visitas', analytics.totalVisits],
+          ['Taps NFC', analytics.totalTaps],
+          ['Escaneos QR', analytics.totalQrScans],
+          ['Clicks', analytics.totalClicks],
+          ['Interacciones totales', analytics.totalInteractions],
+          ['Visitas en el periodo', analytics.visitsThisWeek],
+          ['Visitas periodo anterior', analytics.visitsLastWeek],
+          [
+            'Crecimiento de interacciones',
+            '${analytics.interactionsGrowthPercent.toStringAsFixed(1)}%',
+          ],
+        ],
+      ),
+      XlsxSection(
+        title: 'Visitas por día',
+        headers: const ['Fecha', 'Visitas'],
+        rows: [
+          for (var i = 0; i < analytics.visitsByDay.length; i++)
+            [
+              formatReportDate(
+                _range.end.subtract(
+                  Duration(days: analytics.visitsByDay.length - 1 - i),
+                ),
+              ),
+              analytics.visitsByDay[i],
+            ],
+        ],
+      ),
+      if (analytics.linkStats.isNotEmpty)
+        XlsxSection(
+          title: 'Enlaces más usados',
+          headers: const ['Enlace', 'Plataforma', 'Clicks', '% del total'],
+          rows: [
+            for (final link in analytics.linkStats)
+              [
+                link.label,
+                link.platform,
+                link.clicks,
+                '${(link.percentage * 100).toStringAsFixed(1)}%',
+              ],
+          ],
+        ),
+    ];
+  }
+
+  String get _reportFileName {
+    final now = DateTime.now();
+    final stamp =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+    return 'analiticas_liomont_$stamp';
+  }
+
+  Future<void> _exportExcel() async {
     final analytics = _analytics;
     if (analytics == null) return;
 
     try {
-      final rows = <List<dynamic>>[
-        ['TapLoop - Metrics Report'],
-        ['Rango', '${_fmtDate(_range.start)} - ${_fmtDate(_range.end)}'],
-        [],
-        ['Indicador', 'Valor'],
-        ['Visitas', analytics.totalVisits],
-        ['Taps NFC', analytics.totalTaps],
-        ['Clicks', analytics.totalClicks],
-        ['Interacciones totales', analytics.totalInteractions],
-        ['Visitas en el rango', analytics.visitsThisWeek],
-        ['Visitas período anterior', analytics.visitsLastWeek],
-        [
-          'Crecimiento de interacciones %',
-          analytics.interactionsGrowthPercent.toStringAsFixed(1),
-        ],
-        [],
-        ['Visitas por día', ''],
-        ['Fecha', 'Visitas'],
-      ];
-
-      for (var i = 0; i < analytics.visitsByDay.length; i++) {
-        final date = _range.end.subtract(
-          Duration(days: analytics.visitsByDay.length - 1 - i),
-        );
-        rows.add([_fmtDate(date), analytics.visitsByDay[i]]);
-      }
-
-      final csv = const ListToCsvConverter().convert(rows);
-      final bytes = Uint8List.fromList(csv.codeUnits);
-      final fileName =
-          'taploop_metrics_${DateTime.now().millisecondsSinceEpoch}';
-
+      final bytes = await buildLiomontXlsx(
+        sheetName: 'Analíticas',
+        title: 'Reporte de analíticas · ${_reportScopeLabel()}',
+        subtitle:
+            '$_reportRangeLabel · Generado el ${formatReportDate(DateTime.now())}',
+        sections: _reportSections(analytics),
+        columnWidths: const [34, 22, 14, 14],
+      );
       await FileSaver.instance.saveFile(
-        name: fileName,
+        name: _reportFileName,
         bytes: bytes,
-        fileExtension: 'csv',
-        mimeType: MimeType.csv,
+        fileExtension: 'xlsx',
+        mimeType: MimeType.microsoftExcel,
       );
 
       if (!mounted) return;
       TapLoopToast.show(
         context,
-        'CSV exportado correctamente.',
+        'Excel exportado correctamente.',
         TapLoopToastType.success,
       );
     } catch (e) {
       if (!mounted) return;
       TapLoopToast.show(
         context,
-        'Error al exportar CSV. Intenta nuevamente.',
+        'Error al exportar Excel. Intenta nuevamente.',
         TapLoopToastType.error,
       );
     }
@@ -266,89 +325,59 @@ class _AnalyticsDashboardViewState extends State<AnalyticsDashboardView> {
     if (analytics == null) return;
 
     try {
-      final pdf = pw.Document();
+      final logo = await loadLiomontLogo();
       final generatedAt = DateTime.now();
+      final sections = _reportSections(analytics);
+      final pdf = pw.Document(
+        title: 'Reporte de analíticas',
+        author: 'Liomont',
+      );
 
       pdf.addPage(
         pw.MultiPage(
           pageFormat: PdfPageFormat.a4,
-          margin: const pw.EdgeInsets.all(28),
+          margin: const pw.EdgeInsets.fromLTRB(28, 24, 28, 28),
+          header: (context) => liomontReportHeader(
+            logo: logo,
+            title: 'Reporte de analíticas',
+            subtitle: '${_reportScopeLabel()} · $_reportRangeLabel',
+          ),
+          footer: (context) => liomontReportFooter(context, generatedAt),
           build: (context) => [
-            pw.Text(
-              'TapLoop - Reporte de Métricas',
-              style: pw.TextStyle(fontSize: 22, fontWeight: pw.FontWeight.bold),
+            pw.Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              children: [
+                liomontSummaryChip('Visitas', '${analytics.totalVisits}'),
+                liomontSummaryChip('Taps NFC', '${analytics.totalTaps}'),
+                liomontSummaryChip('Escaneos QR', '${analytics.totalQrScans}'),
+                liomontSummaryChip('Clicks', '${analytics.totalClicks}'),
+                liomontSummaryChip(
+                  'Interacciones',
+                  '${analytics.totalInteractions}',
+                ),
+              ],
             ),
-            pw.SizedBox(height: 6),
-            pw.Text(
-              'Rango: ${_fmtDate(_range.start)} - ${_fmtDate(_range.end)}',
-              style: const pw.TextStyle(fontSize: 11),
-            ),
-            pw.Text(
-              'Generado: ${generatedAt.day}/${generatedAt.month}/${generatedAt.year}',
-              style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey700),
-            ),
-            pw.SizedBox(height: 16),
-            pw.TableHelper.fromTextArray(
-              headerStyle: pw.TextStyle(
-                fontWeight: pw.FontWeight.bold,
-                color: PdfColors.white,
-              ),
-              headerDecoration: const pw.BoxDecoration(
-                color: PdfColor(0.11, 0.31, 0.85),
-              ),
-              cellPadding: const pw.EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 6,
-              ),
-              headers: ['Indicador', 'Valor'],
-              data: [
-                ['Visitas', '${analytics.totalVisits}'],
-                ['Taps NFC', '${analytics.totalTaps}'],
-                ['Clicks', '${analytics.totalClicks}'],
-                ['Interacciones totales', '${analytics.totalInteractions}'],
-                ['Visitas en el rango', '${analytics.visitsThisWeek}'],
-                ['Visitas período anterior', '${analytics.visitsLastWeek}'],
-                [
-                  'Crecimiento de interacciones',
-                  '${analytics.interactionsGrowthPercent.toStringAsFixed(1)}%',
+            pw.SizedBox(height: 10),
+            for (final section in sections) ...[
+              liomontSectionTitle(section.title),
+              liomontTable(
+                fontSize: 9,
+                headers: section.headers,
+                data: [
+                  for (final row in section.rows)
+                    [for (final value in row) '${value ?? ''}'],
                 ],
-              ],
-            ),
-            pw.SizedBox(height: 18),
-            pw.Text(
-              'Visitas por día',
-              style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold),
-            ),
-            pw.SizedBox(height: 8),
-            pw.TableHelper.fromTextArray(
-              headerStyle: pw.TextStyle(fontWeight: pw.FontWeight.bold),
-              cellPadding: const pw.EdgeInsets.symmetric(
-                horizontal: 8,
-                vertical: 6,
               ),
-              headers: ['Fecha', 'Visitas'],
-              data: [
-                for (var i = 0; i < analytics.visitsByDay.length; i++)
-                  [
-                    _fmtDate(
-                      _range.end.subtract(
-                        Duration(days: analytics.visitsByDay.length - 1 - i),
-                      ),
-                    ),
-                    '${analytics.visitsByDay[i]}',
-                  ],
-              ],
-            ),
+              pw.SizedBox(height: 12),
+            ],
           ],
         ),
       );
 
       final bytes = await pdf.save();
-      final fileName =
-          'taploop_metrics_${DateTime.now().millisecondsSinceEpoch}';
-
       await FileSaver.instance.saveFile(
-        name: fileName,
+        name: _reportFileName,
         bytes: bytes,
         fileExtension: 'pdf',
         mimeType: MimeType.pdf,
@@ -368,24 +397,6 @@ class _AnalyticsDashboardViewState extends State<AnalyticsDashboardView> {
         TapLoopToastType.error,
       );
     }
-  }
-
-  static String _fmtDate(DateTime d) {
-    const months = [
-      'Ene',
-      'Feb',
-      'Mar',
-      'Abr',
-      'May',
-      'Jun',
-      'Jul',
-      'Ago',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dic',
-    ];
-    return '${d.day} ${months[d.month - 1]}';
   }
 
   @override
@@ -438,23 +449,24 @@ class _AnalyticsDashboardViewState extends State<AnalyticsDashboardView> {
       runSpacing: 12,
       alignment: WrapAlignment.end,
       children: [
-        TeamMemberFilterDropdown(
-          members: _members,
-          selectedMemberId: _selectedMemberId,
-          onChanged: (memberId) {
-            setState(() {
-              _selectedMemberId = memberId;
-              _analytics = null;
-              _loading = true;
-            });
-            _load();
-          },
-        ),
+        if (appState.currentUser?.isAdmin == true)
+          TeamMemberFilterDropdown(
+            members: _members,
+            selectedMemberId: _selectedMemberId,
+            onChanged: (memberId) {
+              setState(() {
+                _selectedMemberId = memberId;
+                _analytics = null;
+                _loading = true;
+              });
+              _load();
+            },
+          ),
         _PeriodChip(label: 'Todo', onTap: _pickRange),
         _ExportActionButton(
-          label: 'CSV',
+          label: 'Excel',
           icon: Icons.table_chart_outlined,
-          onTap: _loading || _analytics == null ? null : _exportCsv,
+          onTap: _loading || _analytics == null ? null : _exportExcel,
         ),
         _ExportActionButton(
           label: 'PDF',

@@ -1,3 +1,4 @@
+import 'dart:async';
 // ignore_for_file: unused_element
 
 import 'package:flutter/material.dart';
@@ -18,6 +19,10 @@ import '../models/lead_model.dart';
 import '../models/team_member_model.dart';
 import '../models/visit_event_model.dart';
 import '../widgets/team_member_filter_dropdown.dart';
+import '../../../core/utils/search_text.dart';
+import '../../../core/widgets/sortable_header_label.dart';
+import '../../../core/widgets/taploop_text_field.dart';
+import '../../admin/widgets/nfc_reference_table.dart';
 
 Color _teamAnalyticsSurfaceColor(BuildContext context) =>
     context.bgSubtle.withValues(alpha: 0.5);
@@ -296,6 +301,18 @@ class _TeamPerformanceViewState extends State<TeamPerformanceView> {
                         ),
                 ),
               ),
+              if (appState.currentUser?.orgId case final orgId?)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      pagePadding,
+                      20,
+                      pagePadding,
+                      0,
+                    ),
+                    child: NfcReferenceTable(orgId: orgId),
+                  ),
+                ),
               const SliverToBoxAdapter(child: SizedBox(height: 32)),
             ],
           ],
@@ -436,7 +453,7 @@ class _TeamKpiCard extends StatelessWidget {
   }
 }
 
-class _TeamDirectoryPanel extends StatelessWidget {
+class _TeamDirectoryPanel extends StatefulWidget {
   final List<TeamMemberModel> members;
   final Map<String, DateTime> lastActivityByMemberId;
 
@@ -446,7 +463,116 @@ class _TeamDirectoryPanel extends StatelessWidget {
   });
 
   @override
+  State<_TeamDirectoryPanel> createState() => _TeamDirectoryPanelState();
+}
+
+enum _DirectorySort { name, lastActivity }
+
+class _TeamDirectoryPanelState extends State<_TeamDirectoryPanel> {
+  static const _pageSize = 25;
+
+  _DirectorySort _sort = _DirectorySort.name;
+  bool _ascending = true;
+
+  void _toggleSort(_DirectorySort sort) {
+    setState(() {
+      if (_sort == sort) {
+        _ascending = !_ascending;
+      } else {
+        _sort = sort;
+        // Most recent activity first is the useful default for that column.
+        _ascending = sort == _DirectorySort.name;
+      }
+      _visibleCount = _pageSize;
+    });
+  }
+
+  List<TeamMemberModel> _sorted(List<TeamMemberModel> members) {
+    final activity = widget.lastActivityByMemberId;
+    int byName(TeamMemberModel a, TeamMemberModel b) =>
+        a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    int compare(TeamMemberModel a, TeamMemberModel b) {
+      if (_sort == _DirectorySort.name) {
+        final result = byName(a, b);
+        return _ascending ? result : -result;
+      }
+      final aTime = activity[a.id];
+      final bTime = activity[b.id];
+      // Members without activity always go last.
+      if (aTime == null && bTime == null) return byName(a, b);
+      if (aTime == null) return 1;
+      if (bTime == null) return -1;
+      final result = aTime.compareTo(bTime);
+      return result == 0 ? byName(a, b) : (_ascending ? result : -result);
+    }
+
+    return [...members]..sort(compare);
+  }
+
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  String _query = '';
+  int _visibleCount = _pageSize;
+  Map<String, String> _nameKeys = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    _indexMembers();
+  }
+
+  @override
+  void didUpdateWidget(covariant _TeamDirectoryPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.members, widget.members)) _indexMembers();
+  }
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _indexMembers() {
+    _nameKeys = {
+      for (final m in widget.members) m.id: normalizeSearchText(m.name),
+    };
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 180), () {
+      if (!mounted) return;
+      setState(() {
+        _query = normalizeSearchText(value);
+        _visibleCount = _pageSize;
+      });
+    });
+  }
+
+  void _clearSearch() {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    setState(() {
+      _query = '';
+      _visibleCount = _pageSize;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final members = _sorted(
+      _query.isEmpty
+          ? widget.members
+          : widget.members
+                .where((m) => (_nameKeys[m.id] ?? '').contains(_query))
+                .toList(),
+    );
+    final visibleMembers = members.take(_visibleCount).toList();
+    final remaining = members.length - visibleMembers.length;
+    final lastActivityByMemberId = widget.lastActivityByMemberId;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(28, 28, 28, 26),
@@ -475,7 +601,9 @@ class _TeamDirectoryPanel extends StatelessWidget {
                 ),
               ),
               Text(
-                '${members.length} activos',
+                _query.isEmpty
+                    ? '${widget.members.length} activos'
+                    : '${members.length} de ${widget.members.length}',
                 style: GoogleFonts.dmSans(
                   fontSize: 14,
                   fontWeight: FontWeight.w800,
@@ -484,30 +612,73 @@ class _TeamDirectoryPanel extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 28),
-          LayoutBuilder(
-            builder: (context, constraints) {
-              final compact = constraints.maxWidth < 720;
-              return Column(
-                children: [
-                  if (!compact) const _TeamDirectoryHeader(),
-                  if (!compact)
-                    Divider(color: context.borderStrongSoft, height: 28),
-                  ...members.map(
-                    (member) => compact
-                        ? _TeamDirectoryCompactRow(
-                            member: member,
-                            lastActivity: lastActivityByMemberId[member.id],
-                          )
-                        : _TeamDirectoryRow(
-                            member: member,
-                            lastActivity: lastActivityByMemberId[member.id],
-                          ),
-                  ),
-                ],
-              );
-            },
+          const SizedBox(height: 20),
+          TapLoopTextField(
+            label: 'Buscar',
+            hint: 'Buscar por nombre',
+            controller: _searchController,
+            onChanged: _onSearchChanged,
+            textInputAction: TextInputAction.search,
+            prefixIcon: const Icon(Icons.search_rounded),
+            suffixIcon: ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _searchController,
+              builder: (context, value, _) => value.text.isEmpty
+                  ? const SizedBox.shrink()
+                  : IconButton(
+                      tooltip: 'Limpiar búsqueda',
+                      icon: const Icon(Icons.close_rounded),
+                      onPressed: _clearSearch,
+                    ),
+            ),
           ),
+          const SizedBox(height: 24),
+          if (members.isEmpty)
+            const EmptyDataState(
+              hint: 'No hay miembros que coincidan con la búsqueda.',
+            )
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final compact = constraints.maxWidth < 720;
+                return Column(
+                  children: [
+                    if (!compact)
+                      _TeamDirectoryHeader(
+                        sort: _sort,
+                        ascending: _ascending,
+                        onSort: _toggleSort,
+                      ),
+                    if (!compact)
+                      Divider(color: context.borderStrongSoft, height: 28),
+                    for (final member in visibleMembers)
+                      compact
+                          ? _TeamDirectoryCompactRow(
+                              key: ValueKey(member.id),
+                              member: member,
+                              lastActivity: lastActivityByMemberId[member.id],
+                            )
+                          : _TeamDirectoryRow(
+                              key: ValueKey(member.id),
+                              member: member,
+                              lastActivity: lastActivityByMemberId[member.id],
+                            ),
+                  ],
+                );
+              },
+            ),
+          if (remaining > 0) ...[
+            const SizedBox(height: 14),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => setState(() => _visibleCount += _pageSize),
+                icon: const Icon(Icons.expand_more_rounded),
+                label: Text(
+                  'Mostrar más ($remaining restantes)',
+                  style: GoogleFonts.dmSans(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -515,7 +686,15 @@ class _TeamDirectoryPanel extends StatelessWidget {
 }
 
 class _TeamDirectoryHeader extends StatelessWidget {
-  const _TeamDirectoryHeader();
+  final _DirectorySort sort;
+  final bool ascending;
+  final ValueChanged<_DirectorySort> onSort;
+
+  const _TeamDirectoryHeader({
+    required this.sort,
+    required this.ascending,
+    required this.onSort,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -524,12 +703,19 @@ class _TeamDirectoryHeader extends StatelessWidget {
       fontWeight: FontWeight.w700,
       color: context.textSecondary,
     );
+    Widget sortable(String title, _DirectorySort value) => Align(
+      alignment: Alignment.centerLeft,
+      child: SortableHeaderLabel(
+        title: title,
+        active: sort == value,
+        ascending: ascending,
+        onTap: () => onSort(value),
+        style: style,
+      ),
+    );
     return Row(
       children: [
-        Expanded(
-          flex: 34,
-          child: HelpTitle(title: 'Miembro', style: style),
-        ),
+        Expanded(flex: 34, child: sortable('Miembro', _DirectorySort.name)),
         Expanded(
           flex: 13,
           child: HelpTitle(title: 'Rol', style: style),
@@ -544,7 +730,7 @@ class _TeamDirectoryHeader extends StatelessWidget {
         ),
         Expanded(
           flex: 18,
-          child: HelpTitle(title: 'Última actividad', style: style),
+          child: sortable('Última actividad', _DirectorySort.lastActivity),
         ),
         Expanded(
           flex: 13,
@@ -559,7 +745,11 @@ class _TeamDirectoryRow extends StatelessWidget {
   final TeamMemberModel member;
   final DateTime? lastActivity;
 
-  const _TeamDirectoryRow({required this.member, required this.lastActivity});
+  const _TeamDirectoryRow({
+    super.key,
+    required this.member,
+    required this.lastActivity,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -672,6 +862,7 @@ class _TeamDirectoryCompactRow extends StatelessWidget {
   final DateTime? lastActivity;
 
   const _TeamDirectoryCompactRow({
+    super.key,
     required this.member,
     required this.lastActivity,
   });

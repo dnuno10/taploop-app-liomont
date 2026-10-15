@@ -404,12 +404,13 @@ class _DashboardHeader extends StatelessWidget {
     final isWide = MediaQuery.of(context).size.width >= 920;
     final isCompact = MediaQuery.of(context).size.width < 680;
     final actions = [
-      (
-        label: 'Editar tarjeta',
-        icon: Icons.edit_outlined,
-        filled: false,
-        onTap: () => onNavigate(1),
-      ),
+      if (appState.currentUser?.isAdmin == true)
+        (
+          label: 'Editar tarjeta',
+          icon: Icons.edit_outlined,
+          filled: false,
+          onTap: () => onNavigate(1),
+        ),
       (
         label: 'Compartir',
         icon: Icons.ios_share_outlined,
@@ -953,12 +954,13 @@ class _QuickActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final actions = [
-      (
-        icon: Icons.edit_note_outlined,
-        label: 'Actualizar perfil',
-        description: 'Ajusta tu tarjeta y tu presencia digital.',
-        onTap: () => onNavigate(1),
-      ),
+      if (appState.currentUser?.isAdmin == true)
+        (
+          icon: Icons.edit_note_outlined,
+          label: 'Actualizar perfil',
+          description: 'Ajusta tu tarjeta y tu presencia digital.',
+          onTap: () => onNavigate(1),
+        ),
       (
         icon: Icons.send_outlined,
         label: 'Compartir tarjeta',

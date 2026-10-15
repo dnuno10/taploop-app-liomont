@@ -94,9 +94,7 @@ class _HomeShellState extends State<HomeShell> {
                 if (Navigator.of(dialogContext).canPop()) {
                   Navigator.of(dialogContext).pop();
                 }
-                if (mounted) {
-                  setState(() => _index = 1);
-                }
+                if (mounted) _navigateTo(_digitalProfileIndex);
               },
             ),
           ),
@@ -114,13 +112,35 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
-  // Index 6 (AdminView) is only kept for users with an admin-level role.
-  // _navItems below must stay filtered in sync with this, index-for-index.
+  // Logical tab indices. Dashboard shortcuts and _index use these values;
+  // the shells receive only the tabs visible for the current role.
+  static const int _digitalProfileIndex = 1;
+  static const int _teamViewIndex = 5;
   static const int _adminViewIndex = 6;
+  static const _adminOnlyTabs = {
+    _digitalProfileIndex,
+    _teamViewIndex,
+    _adminViewIndex,
+  };
+
+  // "Perfil digital", "Equipo" (other members' data) and "Administración"
+  // are only kept for admin users.
+  static List<int> get _visibleTabs {
+    final isAdmin = appState.currentUser?.isAdmin == true;
+    return [
+      for (var i = 0; i < 8; i++)
+        if (isAdmin || !_adminOnlyTabs.contains(i)) i,
+    ];
+  }
+
+  void _navigateTo(int logicalIndex) {
+    if (!_visibleTabs.contains(logicalIndex)) return;
+    setState(() => _index = logicalIndex);
+  }
 
   List<Widget> get _views {
     final views = [
-      DashboardView(onNavigate: (i) => setState(() => _index = i)),
+      DashboardView(onNavigate: _navigateTo),
       const EditCardView(),
       const ShareCardView(),
       const AnalyticsDashboardView(),
@@ -129,10 +149,7 @@ class _HomeShellState extends State<HomeShell> {
       const AdminView(),
       const SettingsView(),
     ];
-    if (appState.currentUser?.isAdmin != true) {
-      views.removeAt(_adminViewIndex);
-    }
-    return views;
+    return [for (final i in _visibleTabs) views[i]];
   }
 
   Future<void> _setVerifiedBadge(bool value) async {
@@ -205,10 +222,7 @@ class _HomeShellState extends State<HomeShell> {
         label: 'Configuración',
       ),
     ];
-    if (appState.currentUser?.isAdmin != true) {
-      items.removeAt(_adminViewIndex);
-    }
-    return items;
+    return [for (final i in _visibleTabs) items[i]];
   }
 
   @override
@@ -218,12 +232,10 @@ class _HomeShellState extends State<HomeShell> {
       builder: (context, _) {
         final isDesktop = Responsive.isDesktop(context);
         final views = _views;
-        // If the role changes (or on an edge-case first frame) and _index
-        // still points at a tab that got filtered out, fall back to the
-        // last valid tab instead of indexing out of range.
-        final effectiveIndex = views.isEmpty
-            ? 0
-            : _index.clamp(0, views.length - 1);
+        final visibleTabs = _visibleTabs;
+        // If the role changes and _index points at a tab that got filtered
+        // out, fall back to the first tab.
+        final effectiveIndex = math.max(0, visibleTabs.indexOf(_index));
         final loadingInitialCard =
             appState.loadingCard && appState.currentCard == null;
 
@@ -238,7 +250,7 @@ class _HomeShellState extends State<HomeShell> {
             cards: appState.userCards,
             currentCard: appState.currentCard,
             savingVerifiedBadge: _savingVerifiedBadge,
-            onTap: (value) => setState(() => _index = value),
+            onTap: (value) => setState(() => _index = visibleTabs[value]),
             onVerifiedChanged: _setVerifiedBadge,
           );
         }
@@ -249,7 +261,7 @@ class _HomeShellState extends State<HomeShell> {
           cards: appState.userCards,
           currentCard: appState.currentCard,
           creatingCard: _creatingCard,
-          onTap: (value) => setState(() => _index = value),
+          onTap: (value) => setState(() => _index = visibleTabs[value]),
           onSelectCard: appState.selectCardById,
           onCreateCard: _createCard,
         );
@@ -1060,11 +1072,12 @@ class _CardDropdown extends StatelessWidget {
           icon: Icons.add_card_rounded,
           label: 'Vincular tarjeta',
         ),
-        const _StyledPopupEntry<String>(
-          value: '__digital_profile',
-          icon: Icons.person_outline_rounded,
-          label: 'Perfil digital',
-        ),
+        if (appState.currentUser?.isAdmin == true)
+          const _StyledPopupEntry<String>(
+            value: '__digital_profile',
+            icon: Icons.person_outline_rounded,
+            label: 'Perfil digital',
+          ),
       ],
       child: _ProfileSelectorShell(
         compact: compact,

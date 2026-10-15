@@ -17,6 +17,7 @@ import '../../../core/utils/web_image_optimizer.dart';
 import '../../../core/utils/field_validators.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/card_repository.dart';
+import '../../../core/data/repositories/linked_admin_gateway.dart';
 import '../../../core/widgets/card_initial_setup_state.dart';
 import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/shared_template_lock_banner.dart';
@@ -33,12 +34,22 @@ import '../utils/calendar_links.dart';
 import '../widgets/digital_profile_preview.dart';
 
 class EditCardView extends StatefulWidget {
-  const EditCardView({super.key, this.overrideCard, this.onClose});
+  const EditCardView({
+    super.key,
+    this.overrideCard,
+    this.overrideOrgId,
+    this.onClose,
+  });
 
   /// When non-null, this view edits ANOTHER user's card (admin override mode)
   /// instead of the authenticated user's own card. In this mode the global
   /// [appState] is never mutated, so the admin's own session is unaffected.
   final DigitalCardModel? overrideCard;
+
+  /// Org of the member being edited in override mode. Defaults to the
+  /// admin's own org; the admin view passes the member's org when editing a
+  /// member of a linked org (Liomont ↔ Promofarma).
+  final String? overrideOrgId;
 
   /// Shown as a close button in the header when provided (override mode).
   final VoidCallback? onClose;
@@ -181,7 +192,9 @@ class _EditCardViewState extends State<EditCardView>
   }
 
   Future<void> _loadOrganizationName() async {
-    final orgId = appState.currentUser?.orgId;
+    final orgId = _isOverride && widget.overrideOrgId != null
+        ? widget.overrideOrgId
+        : appState.currentUser?.orgId;
     if (orgId == null || orgId.isEmpty) {
       if (!mounted) return;
       setState(() {
@@ -212,13 +225,18 @@ class _EditCardViewState extends State<EditCardView>
           (sharedSettings?.integrationsShared ?? false) && !isTemplate;
       final sharedLinks = (sharedSettings?.linksShared ?? false) && !isTemplate;
 
-      final rows = await SupabaseService.client
-          .from('organizations')
-          .select('name')
-          .eq('id', orgId)
-          .limit(1);
-      final orgRows = rows as List;
-      final org = orgRows.isNotEmpty ? orgRows.first : null;
+      final Map<String, dynamic>? org;
+      if (LinkedAdminGateway.handlesOrg(orgId)) {
+        org = await LinkedAdminGateway.fetchOrg(orgId);
+      } else {
+        final rows = await SupabaseService.client
+            .from('organizations')
+            .select('name')
+            .eq('id', orgId)
+            .limit(1);
+        final orgRows = rows as List;
+        org = orgRows.isNotEmpty ? orgRows.first : null;
+      }
       final orgName = (org?['name'] as String?)?.trim();
       if (!mounted) return;
       if (orgName == null || orgName.isEmpty) {
@@ -396,6 +414,34 @@ class _EditCardViewState extends State<EditCardView>
           TapLoopToastType.warning,
         );
       }
+    }
+  }
+
+  Future<void> _handleProfilePhotoRemoved() async {
+    if (_card.id.isEmpty) return;
+
+    final previousCard = _card;
+    final previousUnsaved = _unsaved;
+    setState(() {
+      _card = _card.copyWith(clearProfilePhoto: true);
+      _unsaved = previousUnsaved;
+    });
+
+    try {
+      await CardRepository.clearProfilePhoto(previousCard.id);
+      if (!_isOverride) {
+        final appCard = appState.currentCard;
+        if (appCard?.id == previousCard.id) {
+          appState.updateCard(appCard!.copyWith(clearProfilePhoto: true));
+        }
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _card = previousCard;
+        _unsaved = previousUnsaved;
+      });
+      rethrow;
     }
   }
 
@@ -1093,6 +1139,7 @@ class _EditCardViewState extends State<EditCardView>
       card: _card,
       companyLocked: _organizationName != null,
       onPhotoChanged: _handleProfilePhotoChanged,
+      onPhotoRemoved: _handleProfilePhotoRemoved,
       onChanged: (c) {
         final verifiedChanged = c.showVerifiedBadge != _card.showVerifiedBadge;
         setState(() {
@@ -1657,6 +1704,7 @@ class _ProfileTab extends StatefulWidget {
   final DigitalCardModel card;
   final bool companyLocked;
   final Future<void> Function(String) onPhotoChanged;
+  final Future<void> Function() onPhotoRemoved;
   final ValueChanged<DigitalCardModel> onChanged;
 
   const _ProfileTab({
@@ -1667,6 +1715,7 @@ class _ProfileTab extends StatefulWidget {
     required this.card,
     required this.companyLocked,
     required this.onPhotoChanged,
+    required this.onPhotoRemoved,
     required this.onChanged,
   });
 
@@ -1755,6 +1804,7 @@ class _ProfileTabState extends State<_ProfileTab> {
               AvatarPicker(
                 card: widget.card,
                 onPhotoChanged: widget.onPhotoChanged,
+                onPhotoRemoved: widget.onPhotoRemoved,
               ),
               const SizedBox(height: 28),
               _EditInputField(
@@ -1820,10 +1870,12 @@ class _ProfileTabState extends State<_ProfileTab> {
 class AvatarPicker extends StatefulWidget {
   final DigitalCardModel card;
   final Future<void> Function(String) onPhotoChanged;
+  final Future<void> Function()? onPhotoRemoved;
   const AvatarPicker({
     super.key,
     required this.card,
     required this.onPhotoChanged,
+    this.onPhotoRemoved,
   });
 
   @override
@@ -1895,18 +1947,28 @@ class AvatarPickerState extends State<AvatarPicker> {
       final userId = widget.card.userId ?? 'unknown';
       final cardId = widget.card.id;
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final path = '$userId/$cardId/profile_$timestamp.${optimized.extension}';
+      var path = '$userId/$cardId/profile_$timestamp.${optimized.extension}';
+      final fileOptions = FileOptions(
+        upsert: true,
+        contentType: optimized.contentType,
+      );
 
-      await SupabaseService.client.storage
-          .from('avatars')
-          .uploadBinary(
-            path,
-            optimized.bytes,
-            fileOptions: FileOptions(
-              upsert: true,
-              contentType: optimized.contentType,
-            ),
-          );
+      try {
+        await SupabaseService.client.storage
+            .from('avatars')
+            .uploadBinary(path, optimized.bytes, fileOptions: fileOptions);
+      } catch (_) {
+        // Storage policies may only allow writing under the uploader's own
+        // folder; for a linked-org member, retry under the admin's folder.
+        final adminId = SupabaseService.client.auth.currentUser?.id;
+        if (!LinkedAdminGateway.handlesCard(cardId) || adminId == null) {
+          rethrow;
+        }
+        path = '$adminId/$cardId/profile_$timestamp.${optimized.extension}';
+        await SupabaseService.client.storage
+            .from('avatars')
+            .uploadBinary(path, optimized.bytes, fileOptions: fileOptions);
+      }
 
       final rawUrl = SupabaseService.client.storage
           .from('avatars')
@@ -1937,9 +1999,65 @@ class AvatarPickerState extends State<AvatarPicker> {
     }
   }
 
+  Future<void> _confirmAndRemove() async {
+    final onPhotoRemoved = widget.onPhotoRemoved;
+    if (onPhotoRemoved == null || _uploading) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: ctx.bgCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Text(
+          'Eliminar foto de perfil',
+          style: GoogleFonts.outfit(fontWeight: FontWeight.w800),
+        ),
+        content: Text(
+          'La foto dejará de mostrarse en el perfil público.',
+          style: GoogleFonts.dmSans(color: ctx.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _uploading = true);
+    try {
+      await onPhotoRemoved();
+      if (mounted) {
+        TapLoopToast.show(
+          context,
+          'Foto de perfil eliminada.',
+          TapLoopToastType.success,
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        TapLoopToast.show(
+          context,
+          'No se pudo eliminar la foto. Intenta de nuevo.',
+          TapLoopToastType.error,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final photoUrl = widget.card.profilePhotoUrl;
+    final photoUrl = widget.card.profilePhotoUrl?.trim().isNotEmpty == true
+        ? widget.card.profilePhotoUrl
+        : null;
     var hoveringButton = false;
     return Center(
       child: Column(
@@ -2030,6 +2148,21 @@ class AvatarPickerState extends State<AvatarPicker> {
               );
             },
           ),
+          if (photoUrl != null && widget.onPhotoRemoved != null) ...[
+            const SizedBox(height: 6),
+            TextButton.icon(
+              onPressed: _uploading ? null : _confirmAndRemove,
+              style: TextButton.styleFrom(foregroundColor: AppColors.error),
+              icon: const Icon(Icons.delete_outline_rounded, size: 18),
+              label: Text(
+                'Eliminar foto',
+                style: GoogleFonts.outfit(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
           Text(
             'JPG, PNG · máx 5 MB',

@@ -1,4 +1,5 @@
 import '../../services/supabase_service.dart';
+import 'linked_admin_gateway.dart';
 import '../../utils/request_deduper.dart';
 import '../../../features/card/models/digital_card_model.dart';
 import '../../../features/card/models/contact_item_model.dart';
@@ -364,6 +365,11 @@ class CardRepository {
     required String company,
     String? orgId,
   }) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      // Never move a linked-org card to another org; only sync the name.
+      await LinkedAdminGateway.updateCard(cardId, {'company': company});
+      return;
+    }
     await _db
         .from('digital_cards')
         .update({
@@ -408,6 +414,10 @@ class CardRepository {
     required String cardId,
     required String slug,
   }) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.updateCard(cardId, {'public_slug': slug});
+      return;
+    }
     await _db
         .from('digital_cards')
         .update({'public_slug': slug})
@@ -448,6 +458,9 @@ class CardRepository {
   ) async {
     final id = orgId?.trim();
     if (id == null || id.isEmpty) return null;
+    if (LinkedAdminGateway.handlesOrg(id)) {
+      return LinkedAdminGateway.fetchOrg(id);
+    }
     return RequestDeduper.run('sharedOrgSettings:$id', () async {
       final rows = await _db
           .from('organizations')
@@ -785,6 +798,10 @@ class CardRepository {
 
   static Future<void> saveCard(DigitalCardModel card) async {
     final payload = card.toJson();
+    if (LinkedAdminGateway.handlesCard(card.id)) {
+      await LinkedAdminGateway.updateCard(card.id, payload);
+      return;
+    }
     try {
       await _db.from('digital_cards').update(payload).eq('id', card.id);
     } catch (error) {
@@ -798,6 +815,12 @@ class CardRepository {
     required String cardId,
     required bool showVerifiedBadge,
   }) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.updateCard(cardId, {
+        'show_verified_badge': showVerifiedBadge,
+      });
+      return;
+    }
     await _db
         .from('digital_cards')
         .update({'show_verified_badge': showVerifiedBadge})
@@ -808,10 +831,32 @@ class CardRepository {
     required String cardId,
     required String profilePhotoUrl,
   }) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.updateCard(cardId, {
+        'profile_photo_url': profilePhotoUrl,
+      });
+      return;
+    }
     await _db
         .from('digital_cards')
         .update({'profile_photo_url': profilePhotoUrl})
         .eq('id', cardId);
+  }
+
+  /// Removes the card's profile photo (sets `profile_photo_url` to null).
+  static Future<void> clearProfilePhoto(String cardId) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.updateCard(cardId, {'profile_photo_url': null});
+      return;
+    }
+    final updated = await _db
+        .from('digital_cards')
+        .update({'profile_photo_url': null})
+        .eq('id', cardId)
+        .select('id');
+    if ((updated as List).isEmpty) {
+      throw Exception('No se pudo eliminar la foto de perfil.');
+    }
   }
 
   static Future<void> deleteCard(String cardId) async {
@@ -824,6 +869,15 @@ class CardRepository {
     String? reason,
   }) async {
     final currentUser = _db.auth.currentUser;
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.updateCard(cardId, {
+        'is_active': isActive,
+        'deactivated_at': isActive ? null : DateTime.now().toIso8601String(),
+        'deactivation_reason': isActive ? null : reason,
+        'deactivated_by': isActive ? null : currentUser?.id,
+      });
+      return;
+    }
     await _db
         .from('digital_cards')
         .update({
@@ -841,6 +895,12 @@ class CardRepository {
     String cardId,
     ContactItemModel item,
   ) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      final saved = await LinkedAdminGateway.upsertContactItems(cardId, [
+        item.toJson()..remove('sort_order'),
+      ]);
+      return saved.first;
+    }
     final last = await _db
         .from('contact_items')
         .select('sort_order')
@@ -860,6 +920,13 @@ class CardRepository {
   }
 
   static Future<void> updateContactItem(ContactItemModel item) async {
+    final linkedCardId = LinkedAdminGateway.contactCardId(item.id);
+    if (linkedCardId != null) {
+      await LinkedAdminGateway.upsertContactItems(linkedCardId, [
+        {'id': item.id, ...item.toJson()},
+      ]);
+      return;
+    }
     final updated = await _db
         .from('contact_items')
         .update(item.toJson())
@@ -871,6 +938,10 @@ class CardRepository {
   }
 
   static Future<void> deleteContactItem(String itemId) async {
+    if (LinkedAdminGateway.contactCardId(itemId) != null) {
+      await LinkedAdminGateway.deleteContactItem(itemId);
+      return;
+    }
     try {
       await _db.rpc(
         'delete_contact_item',
@@ -900,9 +971,20 @@ class CardRepository {
     List<ContactItemModel> items,
   ) async {
     if (items.isEmpty) return;
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.upsertContactItems(cardId, [
+        for (var i = 0; i < items.length; i++)
+          {'id': items[i].id, ...items[i].toJson(), 'sort_order': i},
+      ]);
+      return;
+    }
     final payload = [
       for (var i = 0; i < items.length; i++)
-        {'id': items[i].id, ...items[i].toJson(cardId: cardId), 'sort_order': i},
+        {
+          'id': items[i].id,
+          ...items[i].toJson(cardId: cardId),
+          'sort_order': i,
+        },
     ];
     await _db.from('contact_items').upsert(payload);
   }
@@ -913,6 +995,12 @@ class CardRepository {
     String cardId,
     SocialLinkModel link,
   ) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      final saved = await LinkedAdminGateway.upsertSocialLinks(cardId, [
+        link.toJson()..remove('sort_order'),
+      ]);
+      return saved.first;
+    }
     final last = await _db
         .from('social_links')
         .select('sort_order')
@@ -929,6 +1017,13 @@ class CardRepository {
   }
 
   static Future<void> updateSocialLink(SocialLinkModel link) async {
+    final linkedCardId = LinkedAdminGateway.socialCardId(link.id);
+    if (linkedCardId != null) {
+      await LinkedAdminGateway.upsertSocialLinks(linkedCardId, [
+        {'id': link.id, ...link.toJson()},
+      ]);
+      return;
+    }
     final updated = await _updateSocialLink(link.id, link.toJson());
     if (updated.isEmpty) {
       throw Exception('No se encontró el enlace para actualizar.');
@@ -936,6 +1031,10 @@ class CardRepository {
   }
 
   static Future<void> deleteSocialLink(String linkId) async {
+    if (LinkedAdminGateway.socialCardId(linkId) != null) {
+      await LinkedAdminGateway.deleteSocialLink(linkId);
+      return;
+    }
     try {
       await _db.rpc('delete_social_link', params: {'p_social_link_id': linkId});
       return;
@@ -962,9 +1061,20 @@ class CardRepository {
     List<SocialLinkModel> links,
   ) async {
     if (links.isEmpty) return;
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      await LinkedAdminGateway.upsertSocialLinks(cardId, [
+        for (var i = 0; i < links.length; i++)
+          {'id': links[i].id, ...links[i].toJson(), 'sort_order': i},
+      ]);
+      return;
+    }
     final payload = [
       for (var i = 0; i < links.length; i++)
-        {'id': links[i].id, ...links[i].toJson(cardId: cardId), 'sort_order': i},
+        {
+          'id': links[i].id,
+          ...links[i].toJson(cardId: cardId),
+          'sort_order': i,
+        },
     ];
     await _db.from('social_links').upsert(payload);
   }
@@ -1027,6 +1137,9 @@ class CardRepository {
   // ─── Smart forms ──────────────────────────────────────────────────────────
 
   static Future<List<SmartFormModel>> fetchSmartForms(String cardId) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      return LinkedAdminGateway.fetchSmartForms(cardId);
+    }
     final formsRows = await _db
         .from('smart_forms')
         .select()
@@ -1042,6 +1155,9 @@ class CardRepository {
     String cardId,
     SmartFormModel form,
   ) async {
+    if (LinkedAdminGateway.handlesCard(cardId)) {
+      return LinkedAdminGateway.upsertSmartForm(cardId, form.toJson());
+    }
     final data = await _db
         .from('smart_forms')
         .insert(form.toJson(cardId: cardId))
@@ -1051,10 +1167,21 @@ class CardRepository {
   }
 
   static Future<void> updateSmartForm(SmartFormModel form) async {
+    if (LinkedAdminGateway.handlesCard(form.cardId)) {
+      await LinkedAdminGateway.upsertSmartForm(form.cardId, {
+        'id': form.id,
+        ...form.toJson(),
+      });
+      return;
+    }
     await _db.from('smart_forms').update(form.toJson()).eq('id', form.id);
   }
 
   static Future<void> deleteSmartForm(String formId) async {
+    if (LinkedAdminGateway.handlesForm(formId)) {
+      await LinkedAdminGateway.deleteSmartForm(formId);
+      return;
+    }
     try {
       await _db.rpc('delete_smart_form', params: {'p_form_id': formId});
       return;

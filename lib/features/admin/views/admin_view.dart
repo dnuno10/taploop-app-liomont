@@ -1,3 +1,4 @@
+import 'dart:async';
 // ignore_for_file: avoid_web_libraries_in_flutter, deprecated_member_use, unused_element
 import 'dart:html' as html;
 
@@ -11,11 +12,15 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_theme_extensions.dart';
 import '../../../core/utils/responsive.dart';
+import '../../../core/utils/csv_export.dart';
+import '../../../core/utils/search_text.dart';
+import '../../../core/widgets/sortable_header_label.dart';
 import '../../../core/utils/storage_upload_error.dart';
 import '../../../core/utils/web_image_optimizer.dart';
 import '../../../core/data/app_state.dart';
 import '../../../core/data/repositories/admin_repository.dart';
 import '../../../core/data/repositories/card_repository.dart';
+import '../../../core/data/repositories/linked_admin_gateway.dart';
 import '../../../core/services/metrics_realtime_service.dart';
 import '../../../core/services/supabase_service.dart';
 import '../../../core/widgets/taploop_button.dart';
@@ -25,6 +30,8 @@ import '../../../core/widgets/section_header.dart';
 import '../../../core/widgets/taploop_toast.dart';
 import '../../../core/widgets/taploop_progress_indicator.dart';
 import '../../analytics/models/team_member_model.dart';
+import '../widgets/member_qr_dialog.dart';
+import '../widgets/nfc_reference_table.dart';
 import '../../card/models/digital_card_model.dart';
 import '../../card/models/smart_form_model.dart';
 import '../../card/utils/calendar_links.dart';
@@ -123,10 +130,39 @@ class _AdminMember {
   _AdminCalProvider? calendarProvider;
   String? calendarioUrl;
   String? customIntegrationLabel;
+  String? orgId;
+  String orgName;
+  List<String> nfcSerials;
+
+  /// Member of the OTHER linked org (Liomont ↔ Promofarma). Editable through
+  /// [LinkedAdminGateway]; excluded from own-org shared settings.
+  final bool fromLinkedOrg;
+
+  /// Whether [card] is a real stored card (false for the local fallback).
+  final bool hasStoredCard;
+
+  String? _searchKey;
+
+  /// Normalized text the admin search bar matches against; computed once.
+  String get searchKey => _searchKey ??= normalizeSearchText(
+    [
+      card.name,
+      member.name,
+      member.email,
+      orgName,
+      card.company,
+      ...nfcSerials,
+    ].join(' '),
+  );
 
   _AdminMember({
     required this.member,
     required this.card,
+    this.orgId,
+    this.orgName = '',
+    this.nfcSerials = const [],
+    this.fromLinkedOrg = false,
+    this.hasStoredCard = true,
     this.isActive = true,
     List<_AdminSmartForm>? forms,
     this.calendarProvider,
@@ -294,6 +330,7 @@ class _AdminViewState extends State<AdminView> {
   _ConsistencyKind? _expandedConsistencyKind;
   MetricsRealtimeSubscription? _metricsRealtime;
   String? _realtimeOrgId;
+  String? _loadedOrgId;
   final GlobalKey _profilesKey = GlobalKey();
 
   @override
@@ -314,7 +351,9 @@ class _AdminViewState extends State<AdminView> {
   void _onAppStateChanged() {
     final orgId = appState.currentUser?.orgId;
     _bindRealtime();
-    if (!mounted || orgId == null) return;
+    // appState notifies for many unrelated changes (selected card, loading
+    // flags, ...). Only a different org requires reloading this screen.
+    if (!mounted || orgId == null || orgId == _loadedOrgId) return;
     setState(() => _loading = true);
     _loadData();
   }
@@ -334,7 +373,8 @@ class _AdminViewState extends State<AdminView> {
     );
   }
 
-  Future<void> _loadData() async {
+  /// [force] skips the short team-members cache (used after edits).
+  Future<void> _loadData({bool force = false}) async {
     final orgId = appState.currentUser?.orgId;
     if (orgId == null) {
       if (mounted) setState(() => _loading = false);
@@ -342,14 +382,25 @@ class _AdminViewState extends State<AdminView> {
     }
     try {
       final results = await Future.wait<dynamic>([
-        AdminRepository.fetchTeamMembers(orgId),
+        AdminRepository.fetchTeamMembers(orgId, forceRefresh: force),
         AdminRepository.fetchOrg(orgId),
+        AdminRepository.usesLinkedDirectory(orgId)
+            ? AdminRepository.fetchLinkedDirectory()
+            : Future.value(const <LinkedDirectoryEntry>[]),
       ]);
       final teamMembers = results[0] as List<TeamMemberModel>;
       final orgData = results[1] as Map<String, dynamic>?;
+      final directory = results[2] as List<LinkedDirectoryEntry>;
       final hydratedMembers = await _buildMembers(teamMembers);
+      await _attachDirectoryInfo(
+        members: hydratedMembers,
+        orgId: orgId,
+        orgName: orgData?['name'] as String? ?? '',
+        directory: directory,
+      );
       if (mounted) {
         setState(() {
+          _loadedOrgId = orgId;
           _members = hydratedMembers;
           _consistency = _TeamConsistencySettings.fromOrg(orgData);
           _loading = false;
@@ -357,6 +408,65 @@ class _AdminViewState extends State<AdminView> {
       }
     } catch (_) {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// Fills org name and NFC serials (used by the search bar) and appends the
+  /// read-only members of the linked org, if any.
+  static Future<void> _attachDirectoryInfo({
+    required List<_AdminMember> members,
+    required String orgId,
+    required String orgName,
+    required List<LinkedDirectoryEntry> directory,
+  }) async {
+    final entriesByUserId = {for (final e in directory) e.member.id: e};
+    final serialsByCard = directory.isEmpty
+        ? await AdminRepository.fetchNfcSerialsByCard(
+            members.expand((m) => m.member.cardIds).toList(),
+          )
+        : const <String, List<String>>{};
+
+    for (final m in members) {
+      final entry = entriesByUserId[m.member.id];
+      m.orgId = orgId;
+      m.orgName = entry?.orgName.trim().isNotEmpty == true
+          ? entry!.orgName
+          : orgName;
+      m.nfcSerials =
+          entry?.nfcSerials ??
+          [for (final id in m.member.cardIds) ...?serialsByCard[id]];
+    }
+
+    final ownIds = members.map((m) => m.member.id).toSet();
+    for (final entry in directory) {
+      if (entry.orgId == orgId || ownIds.contains(entry.member.id)) continue;
+      final card =
+          entry.card ??
+          _fallbackCard(
+            member: entry.member,
+            index: members.length,
+            colors: const [Color(0xFF0D0D0D)],
+            styles: const [CardThemeStyle.white],
+          );
+      if (entry.card != null) {
+        LinkedAdminGateway.registerCard(entry.card!, orgId: entry.orgId);
+      }
+      members.add(
+        _AdminMember(
+          member: entry.member,
+          card: card,
+          orgId: entry.orgId,
+          orgName: entry.orgName,
+          nfcSerials: entry.nfcSerials,
+          fromLinkedOrg: true,
+          hasStoredCard: entry.card != null,
+          isActive: card.isActive,
+          forms: _formsFromCard(card),
+          calendarProvider: _providerFromUrl(card.calendarUrl),
+          calendarioUrl: _firstCalendarUrlFromStored(card.calendarUrl),
+          customIntegrationLabel: parseCustomCalendarLabel(card.calendarUrl),
+        ),
+      );
     }
   }
 
@@ -369,8 +479,12 @@ class _AdminViewState extends State<AdminView> {
       const Color(0xFF1F2937),
       const Color(0xFF6B7280),
     ];
+    final orgId = appState.currentUser?.orgId;
     final cardsByUserId = await AdminRepository.fetchCardsForUsers(
       teamMembers.map((m) => m.id).toList(),
+      orgIdByUserId: orgId == null
+          ? const {}
+          : {for (final m in teamMembers) m.id: orgId},
     );
 
     return teamMembers.asMap().entries.map((e) {
@@ -522,11 +636,36 @@ class _AdminViewState extends State<AdminView> {
     };
   }
 
-  void _editMember(_AdminMember member) {
+  /// Admin edits must only touch the member being edited. The legacy
+  /// delete/replace RPCs only allow a card's own owner, so for Liomont /
+  /// Promofarma admins every write on a member's card goes through the
+  /// card-scoped `lp_admin_*` RPCs (see LinkedAdminGateway).
+  Future<void> _routeMemberWritesThroughGateway(_AdminMember member) async {
+    final adminOrgId = appState.currentUser?.orgId;
+    if (adminOrgId == null ||
+        !AdminRepository.usesLinkedDirectory(adminOrgId) ||
+        !member.hasStoredCard) {
+      return;
+    }
+    if (await LinkedAdminGateway.isAvailable(adminOrgId)) {
+      LinkedAdminGateway.registerCard(
+        member.card,
+        orgId: member.orgId ?? adminOrgId,
+      );
+    }
+  }
+
+  Future<void> _editMember(_AdminMember member) async {
+    if (!member.hasStoredCard) {
+      _showNoCardToast();
+      return;
+    }
     if (member.isAdmin) {
       _showAdminEditBlockedToast();
       return;
     }
+    await _routeMemberWritesThroughGateway(member);
+    if (!mounted) return;
     // Reuse EditCardView itself (in admin override mode) so editing a team
     // member looks and behaves EXACTLY like editing one's own digital
     // profile, instead of a parallel, hand-styled dialog that can drift out
@@ -535,22 +674,25 @@ class _AdminViewState extends State<AdminView> {
       showDialog(
         context: context,
         builder: (ctx) => Dialog(
+          // Use (almost) the full window so the editor's link/contact
+          // columns have room instead of getting cut off.
+          insetPadding: const EdgeInsets.all(16),
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(28),
           ),
+          clipBehavior: Clip.antiAlias,
           backgroundColor: ctx.bgCard,
           child: SizedBox(
-            width: (MediaQuery.of(ctx).size.width * 0.9)
-                .clamp(960.0, 1180.0)
-                .toDouble(),
-            height: MediaQuery.of(context).size.height * 0.88,
+            width: MediaQuery.of(ctx).size.width - 32,
+            height: MediaQuery.of(ctx).size.height - 32,
             child: EditCardView(
               overrideCard: member.card,
+              overrideOrgId: member.orgId,
               onClose: () => Navigator.of(ctx).maybePop(),
             ),
           ),
         ),
-      ).then((_) => _loadData());
+      ).then((_) => _loadData(force: true));
     } else {
       showModalBottomSheet(
         context: context,
@@ -561,32 +703,42 @@ class _AdminViewState extends State<AdminView> {
           minChildSize: 0.6,
           maxChildSize: 0.95,
           builder: (ctx, ctrl) => Container(
+            clipBehavior: Clip.antiAlias,
             decoration: BoxDecoration(
               color: ctx.bgCard,
               borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(24),
+                top: Radius.circular(28),
               ),
             ),
             child: EditCardView(
               overrideCard: member.card,
+              overrideOrgId: member.orgId,
               onClose: () => Navigator.of(ctx).maybePop(),
             ),
           ),
         ),
-      ).then((_) => _loadData());
+      ).then((_) => _loadData(force: true));
     }
   }
 
+  /// Members of the current user's own org. The listing may also include
+  /// members of linked orgs, but shared settings and template members are
+  /// scoped to the own org only.
+  List<_AdminMember> get _ownOrgMembers {
+    return _members.where((m) => !m.fromLinkedOrg).toList();
+  }
+
   _AdminMember? _sourceMemberForSharedSettings() {
+    final ownMembers = _ownOrgMembers;
     final currentCardId = appState.currentCard?.id;
     if (currentCardId != null && currentCardId.isNotEmpty) {
-      final match = _members.cast<_AdminMember?>().firstWhere(
+      final match = ownMembers.cast<_AdminMember?>().firstWhere(
         (member) => member?.card.id == currentCardId,
         orElse: () => null,
       );
       if (match != null) return match;
     }
-    return _members.isEmpty ? null : _members.first;
+    return ownMembers.isEmpty ? null : ownMembers.first;
   }
 
   Future<void> _toggleConsistency({
@@ -602,7 +754,7 @@ class _AdminViewState extends State<AdminView> {
     // Cancelling the picker must leave the toggle untouched.
     String? templateCardId;
     if (enabled) {
-      if (_members.isEmpty) return;
+      if (_ownOrgMembers.isEmpty) return;
       final picked = await _pickTemplateMember();
       if (picked == null || !mounted) return;
       templateCardId = picked.card.id;
@@ -643,7 +795,7 @@ class _AdminViewState extends State<AdminView> {
             : 'Configuración compartida desactivada.',
         TapLoopToastType.success,
       );
-      await _loadData();
+      await _loadData(force: true);
     } catch (_) {
       if (!mounted) return;
       setState(() => _consistency = previous);
@@ -663,7 +815,7 @@ class _AdminViewState extends State<AdminView> {
   _AdminMember? _currentTemplateMember() {
     final templateId = _consistency.templateCardId;
     if (templateId != null && templateId.isNotEmpty) {
-      final match = _members.cast<_AdminMember?>().firstWhere(
+      final match = _ownOrgMembers.cast<_AdminMember?>().firstWhere(
         (member) => member?.card.id == templateId,
         orElse: () => null,
       );
@@ -680,7 +832,7 @@ class _AdminViewState extends State<AdminView> {
 
   Future<void> _changeTemplateMember() async {
     final orgId = appState.currentUser?.orgId;
-    if (orgId == null || orgId.isEmpty || _members.isEmpty) return;
+    if (orgId == null || orgId.isEmpty || _ownOrgMembers.isEmpty) return;
     final selected = await _pickTemplateMember();
     if (selected == null || !mounted) return;
     try {
@@ -694,7 +846,7 @@ class _AdminViewState extends State<AdminView> {
         'Miembro plantilla actualizado.',
         TapLoopToastType.success,
       );
-      await _loadData();
+      await _loadData(force: true);
     } catch (_) {
       if (!mounted) return;
       TapLoopToast.show(
@@ -711,6 +863,7 @@ class _AdminViewState extends State<AdminView> {
   /// template member (if any) is marked with a checkmark and can simply be
   /// tapped again to keep it.
   Future<_AdminMember?> _pickTemplateMember() {
+    final members = _ownOrgMembers;
     return showDialog<_AdminMember>(
       context: context,
       builder: (ctx) => Dialog(
@@ -744,11 +897,11 @@ class _AdminViewState extends State<AdminView> {
                 Flexible(
                   child: ListView.separated(
                     shrinkWrap: true,
-                    itemCount: _members.length,
+                    itemCount: members.length,
                     separatorBuilder: (_, _) =>
                         Divider(height: 1, color: ctx.borderColor),
                     itemBuilder: (_, i) {
-                      final m = _members[i];
+                      final m = members[i];
                       final isCurrent =
                           m.card.id == _consistency.templateCardId;
                       return ListTile(
@@ -844,9 +997,6 @@ class _AdminViewState extends State<AdminView> {
     }
     final isDesktop = Responsive.isDesktop(context);
     final hPad = Responsive.isMobile(context) ? 20.0 : 32.0;
-    final activeMembers = _members.where((member) => member.isActive).toList();
-    final activeCount = activeMembers.length;
-    final inactiveCount = _members.length - activeCount;
 
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -912,12 +1062,14 @@ class _AdminViewState extends State<AdminView> {
                     _TeamProfilesPanel(
                       key: _profilesKey,
                       members: _members,
-                      activeCount: activeCount,
-                      inactiveCount: inactiveCount,
                       onView: _viewMember,
                       onEdit: _editMember,
                       onToggle: _toggleMember,
                     ),
+                  if (appState.currentUser?.orgId case final orgId?) ...[
+                    const SizedBox(height: 20),
+                    NfcReferenceTable(orgId: orgId),
+                  ],
                   const SizedBox(height: 32),
                 ],
               ),
@@ -929,10 +1081,16 @@ class _AdminViewState extends State<AdminView> {
   }
 
   Future<void> _toggleMember(_AdminMember m, bool value) async {
+    if (!m.hasStoredCard) {
+      _showNoCardToast();
+      return;
+    }
     if (m.isAdmin) {
       _showAdminEditBlockedToast();
       return;
     }
+    await _routeMemberWritesThroughGateway(m);
+    if (!mounted) return;
     final previous = m.isActive;
     setState(() => m.isActive = value);
     try {
@@ -965,6 +1123,14 @@ class _AdminViewState extends State<AdminView> {
   void _viewMember(_AdminMember member) {
     final url = member.card.publicUrl;
     html.window.open(url, '_blank');
+  }
+
+  void _showNoCardToast() {
+    TapLoopToast.show(
+      context,
+      'Este colaborador aún no tiene una tarjeta digital vinculada.',
+      TapLoopToastType.warning,
+    );
   }
 
   void _showAdminEditBlockedToast() {
@@ -2589,10 +2755,8 @@ class _SharedOptionChip extends StatelessWidget {
   }
 }
 
-class _TeamProfilesPanel extends StatelessWidget {
+class _TeamProfilesPanel extends StatefulWidget {
   final List<_AdminMember> members;
-  final int activeCount;
-  final int inactiveCount;
   final void Function(_AdminMember) onView;
   final void Function(_AdminMember) onEdit;
   final void Function(_AdminMember, bool) onToggle;
@@ -2600,15 +2764,155 @@ class _TeamProfilesPanel extends StatelessWidget {
   const _TeamProfilesPanel({
     super.key,
     required this.members,
-    required this.activeCount,
-    required this.inactiveCount,
     required this.onView,
     required this.onEdit,
     required this.onToggle,
   });
 
   @override
+  State<_TeamProfilesPanel> createState() => _TeamProfilesPanelState();
+}
+
+enum _ProfileSort { name, organization, status, progress }
+
+class _TeamProfilesPanelState extends State<_TeamProfilesPanel> {
+  _ProfileSort _sort = _ProfileSort.name;
+  bool _ascending = true;
+  bool _exporting = false;
+
+  void _toggleSort(_ProfileSort sort) {
+    setState(() {
+      if (_sort == sort) {
+        _ascending = !_ascending;
+      } else {
+        _sort = sort;
+        // Progress reads best "least complete first"; text columns A→Z.
+        _ascending = true;
+      }
+      _visibleCount = _pageSize;
+    });
+  }
+
+  List<_AdminMember> _sorted(List<_AdminMember> members) {
+    int compare(_AdminMember a, _AdminMember b) {
+      final result = switch (_sort) {
+        _ProfileSort.name => _memberDisplayName(
+          a,
+        ).toLowerCase().compareTo(_memberDisplayName(b).toLowerCase()),
+        _ProfileSort.organization => _memberOrganization(
+          a,
+        ).toLowerCase().compareTo(_memberOrganization(b).toLowerCase()),
+        _ProfileSort.status => (a.isActive ? 0 : 1).compareTo(
+          b.isActive ? 0 : 1,
+        ),
+        _ProfileSort.progress => _profileCompletion(
+          a.card,
+        ).compareTo(_profileCompletion(b.card)),
+      };
+      if (result != 0) return _ascending ? result : -result;
+      return _memberDisplayName(
+        a,
+      ).toLowerCase().compareTo(_memberDisplayName(b).toLowerCase());
+    }
+
+    return [...members]..sort(compare);
+  }
+
+  Future<void> _exportCsv(List<_AdminMember> members) async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      await saveCsvFile('perfiles_equipo', [
+        [
+          'Nombre',
+          'Cargo',
+          'Empresa',
+          'Organización',
+          'Correo',
+          'Seriales NFC',
+          'Perfil público',
+          'Estado',
+          'Progreso (%)',
+        ],
+        for (final m in members)
+          [
+            _memberDisplayName(m),
+            m.card.jobTitle,
+            m.card.company,
+            m.orgName,
+            m.member.email,
+            m.nfcSerials.join(' | '),
+            m.card.publicUrl,
+            m.isActive ? 'Activo' : 'Inactivo',
+            (_profileCompletion(m.card) * 100).round(),
+          ],
+      ]);
+      if (!mounted) return;
+      TapLoopToast.show(
+        context,
+        'Listado exportado (${members.length} perfiles).',
+        TapLoopToastType.success,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      TapLoopToast.show(
+        context,
+        'No se pudo exportar el listado.',
+        TapLoopToastType.error,
+      );
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  // Rows are rendered in pages so large teams don't build hundreds of rows
+  // (with avatars) on every keystroke.
+  static const _pageSize = 25;
+
+  final TextEditingController _searchController = TextEditingController();
+  Timer? _searchDebounce;
+  String _query = '';
+  int _visibleCount = _pageSize;
+
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 180), () {
+      if (!mounted) return;
+      setState(() {
+        _query = normalizeSearchText(value);
+        _visibleCount = _pageSize;
+      });
+    });
+  }
+
+  void _clearSearch() {
+    _searchDebounce?.cancel();
+    _searchController.clear();
+    setState(() {
+      _query = '';
+      _visibleCount = _pageSize;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final members = _sorted(
+      _query.isEmpty
+          ? widget.members
+          : widget.members.where((m) => m.searchKey.contains(_query)).toList(),
+    );
+    final activeCount = members.where((member) => member.isActive).length;
+    final inactiveCount = members.length - activeCount;
+    final visibleMembers = members.take(_visibleCount).toList();
+    final remaining = members.length - visibleMembers.length;
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.fromLTRB(34, 34, 34, 34),
@@ -2668,6 +2972,12 @@ class _TeamProfilesPanel extends StatelessWidget {
                     label: 'Inactivos',
                     color: context.textSecondary,
                   ),
+                  _ExportCsvButton(
+                    exporting: _exporting,
+                    onPressed: members.isEmpty
+                        ? null
+                        : () => _exportCsv(members),
+                  ),
                 ],
               );
               return compact
@@ -2685,28 +2995,72 @@ class _TeamProfilesPanel extends StatelessWidget {
             },
           ),
           const SizedBox(height: 26),
-          Divider(color: context.borderStrongSoft, height: 1),
-          const SizedBox(height: 18),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(minWidth: 1120),
-              child: Column(
-                children: [
-                  const _TeamProfilesHeader(),
-                  Divider(color: context.borderStrongSoft, height: 28),
-                  ...members.map(
-                    (member) => _TeamProfileRow(
-                      member: member,
-                      onView: () => onView(member),
-                      onEdit: () => onEdit(member),
-                      onToggle: (enabled) => onToggle(member, enabled),
-                    ),
-                  ),
-                ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: TapLoopTextField(
+              label: 'Buscar',
+              hint: 'Nombre, serial de tarjeta NFC u organización',
+              controller: _searchController,
+              onChanged: _onSearchChanged,
+              textInputAction: TextInputAction.search,
+              prefixIcon: const Icon(Icons.search_rounded),
+              suffixIcon: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _searchController,
+                builder: (context, value, _) => value.text.isEmpty
+                    ? const SizedBox.shrink()
+                    : IconButton(
+                        tooltip: 'Limpiar búsqueda',
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: _clearSearch,
+                      ),
               ),
             ),
           ),
+          const SizedBox(height: 18),
+          Divider(color: context.borderStrongSoft, height: 1),
+          const SizedBox(height: 18),
+          if (members.isEmpty)
+            const EmptyDataState(
+              hint: 'No hay perfiles que coincidan con la búsqueda.',
+            )
+          else
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minWidth: 1240),
+                child: Column(
+                  children: [
+                    _TeamProfilesHeader(
+                      sort: _sort,
+                      ascending: _ascending,
+                      onSort: _toggleSort,
+                    ),
+                    Divider(color: context.borderStrongSoft, height: 28),
+                    for (final member in visibleMembers)
+                      _TeamProfileRow(
+                        key: ValueKey(member.member.id),
+                        member: member,
+                        onView: () => widget.onView(member),
+                        onEdit: () => widget.onEdit(member),
+                        onToggle: (enabled) => widget.onToggle(member, enabled),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          if (remaining > 0) ...[
+            const SizedBox(height: 18),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => setState(() => _visibleCount += _pageSize),
+                icon: const Icon(Icons.expand_more_rounded),
+                label: Text(
+                  'Mostrar más ($remaining restantes)',
+                  style: GoogleFonts.dmSans(fontWeight: FontWeight.w800),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -2764,7 +3118,15 @@ class _ProfileCounterPill extends StatelessWidget {
 }
 
 class _TeamProfilesHeader extends StatelessWidget {
-  const _TeamProfilesHeader();
+  final _ProfileSort sort;
+  final bool ascending;
+  final ValueChanged<_ProfileSort> onSort;
+
+  const _TeamProfilesHeader({
+    required this.sort,
+    required this.ascending,
+    required this.onSort,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -2773,33 +3135,78 @@ class _TeamProfilesHeader extends StatelessWidget {
       fontWeight: FontWeight.w800,
       color: context.textSecondary,
     );
+    Widget sortable(String title, _ProfileSort value) => Align(
+      alignment: Alignment.centerLeft,
+      child: SortableHeaderLabel(
+        title: title,
+        active: sort == value,
+        ascending: ascending,
+        onTap: () => onSort(value),
+        style: style,
+      ),
+    );
     return Row(
       children: [
-        SizedBox(
-          width: 260,
-          child: HelpTitle(title: 'Miembro', style: style),
-        ),
+        SizedBox(width: 260, child: sortable('Miembro', _ProfileSort.name)),
         SizedBox(
           width: 250,
-          child: HelpTitle(title: 'Cargo / Empresa', style: style),
+          child: sortable('Cargo / Empresa', _ProfileSort.organization),
         ),
         SizedBox(
           width: 220,
           child: HelpTitle(title: 'Perfil público', style: style),
         ),
-        SizedBox(
-          width: 150,
-          child: HelpTitle(title: 'Estado', style: style),
-        ),
+        SizedBox(width: 150, child: sortable('Estado', _ProfileSort.status)),
         SizedBox(
           width: 180,
-          child: HelpTitle(title: 'Progreso', style: style),
+          child: sortable('Progreso', _ProfileSort.progress),
         ),
         SizedBox(
-          width: 300,
+          width: 420,
           child: HelpTitle(title: 'Acciones', style: style),
         ),
       ],
+    );
+  }
+}
+
+String _memberDisplayName(_AdminMember m) =>
+    m.card.name.trim().isNotEmpty ? m.card.name.trim() : m.member.name.trim();
+
+String _memberOrganization(_AdminMember m) {
+  if (m.orgName.trim().isNotEmpty) return m.orgName.trim();
+  return m.card.company.trim();
+}
+
+class _ExportCsvButton extends StatelessWidget {
+  final bool exporting;
+  final VoidCallback? onPressed;
+
+  const _ExportCsvButton({required this.exporting, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: exporting ? null : onPressed,
+      icon: exporting
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: TapLoopProgressIndicator(color: AppColors.primary),
+            )
+          : const Icon(Icons.table_view_outlined, size: 19),
+      label: Text(exporting ? 'Exportando…' : 'Exportar CSV'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: context.textPrimary,
+        side: BorderSide(color: context.borderStrongSoft, width: 1.2),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+        minimumSize: const Size(0, 50),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+        textStyle: GoogleFonts.dmSans(
+          fontSize: 15,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
     );
   }
 }
@@ -2811,6 +3218,7 @@ class _TeamProfileRow extends StatelessWidget {
   final ValueChanged<bool> onToggle;
 
   const _TeamProfileRow({
+    super.key,
     required this.member,
     required this.onView,
     required this.onEdit,
@@ -2870,7 +3278,16 @@ class _TeamProfileRow extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '${member.card.company.trim().isEmpty ? member.member.name : member.card.company} · ${member.member.email}',
+                  [
+                    if (member.orgName.trim().isNotEmpty)
+                      member.orgName.trim()
+                    else if (member.card.company.trim().isNotEmpty)
+                      member.card.company.trim()
+                    else
+                      member.member.name,
+                    member.member.email,
+                    ...member.nfcSerials.map((serial) => 'NFC $serial'),
+                  ].join(' · '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: GoogleFonts.dmSans(
@@ -2884,27 +3301,9 @@ class _TeamProfileRow extends StatelessWidget {
           ),
           SizedBox(
             width: 220,
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    member.card.publicUrl.replaceFirst('https://', ''),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: GoogleFonts.dmSans(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w900,
-                      color: AppColors.primary,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                const Icon(
-                  Icons.open_in_new_rounded,
-                  size: 15,
-                  color: AppColors.primary,
-                ),
-              ],
+            child: _PublicProfileLink(
+              url: member.card.publicUrl,
+              onTap: onView,
             ),
           ),
           SizedBox(
@@ -2961,7 +3360,7 @@ class _TeamProfileRow extends StatelessWidget {
             ),
           ),
           SizedBox(
-            width: 300,
+            width: 420,
             child: Row(
               children: [
                 _ProfileActionButton(
@@ -2975,7 +3374,32 @@ class _TeamProfileRow extends StatelessWidget {
                   label: 'Editar',
                   onTap: onEdit,
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 6),
+                _ProfileIconAction(
+                  icon: Icons.link_rounded,
+                  tooltip: 'Copiar enlace público',
+                  onTap: () async {
+                    await Clipboard.setData(
+                      ClipboardData(text: member.card.publicUrl),
+                    );
+                    if (!context.mounted) return;
+                    TapLoopToast.show(
+                      context,
+                      'Enlace copiado.',
+                      TapLoopToastType.success,
+                    );
+                  },
+                ),
+                _ProfileIconAction(
+                  icon: Icons.qr_code_2_rounded,
+                  tooltip: 'Ver y descargar QR',
+                  onTap: () => showMemberQrDialog(
+                    context,
+                    memberName: _memberDisplayName(member),
+                    publicUrl: member.card.publicUrl,
+                  ),
+                ),
+                const SizedBox(width: 6),
                 Switch.adaptive(
                   value: member.isActive,
                   onChanged: isAdmin ? null : onToggle,
@@ -2986,6 +3410,68 @@ class _TeamProfileRow extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Public profile URL in the team list: opens the member's public profile,
+/// with a pointer cursor and underline on hover.
+class _PublicProfileLink extends StatefulWidget {
+  final String url;
+  final VoidCallback onTap;
+
+  const _PublicProfileLink({required this.url, required this.onTap});
+
+  @override
+  State<_PublicProfileLink> createState() => _PublicProfileLinkState();
+}
+
+class _PublicProfileLinkState extends State<_PublicProfileLink> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Abrir perfil público',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: AnimatedOpacity(
+            duration: const Duration(milliseconds: 120),
+            opacity: _hovered ? 0.8 : 1,
+            child: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    widget.url.replaceFirst('https://', ''),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.dmSans(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                      color: AppColors.primary,
+                      decoration: _hovered
+                          ? TextDecoration.underline
+                          : TextDecoration.none,
+                      decorationColor: AppColors.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                const Icon(
+                  Icons.open_in_new_rounded,
+                  size: 15,
+                  color: AppColors.primary,
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -3020,6 +3506,32 @@ class _AdminMemberAvatar extends StatelessWidget {
               color: AppColors.primary,
               size: size * 0.46,
             ),
+    );
+  }
+}
+
+class _ProfileIconAction extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  const _ProfileIconAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onTap,
+      icon: Icon(icon, size: 22),
+      color: context.textPrimary,
+      style: IconButton.styleFrom(
+        side: BorderSide(color: context.borderStrongSoft, width: 1.2),
+        minimumSize: const Size(46, 46),
+      ),
     );
   }
 }

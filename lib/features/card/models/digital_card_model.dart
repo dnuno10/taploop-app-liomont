@@ -275,6 +275,9 @@ class DigitalCardModel {
     String? deactivationReason,
     String? deactivatedBy,
     DateTime? updatedAt,
+    // copyWith can't distinguish "not passed" from null, so removing the
+    // photo needs an explicit flag.
+    bool clearProfilePhoto = false,
   }) {
     return DigitalCardModel(
       id: id ?? this.id,
@@ -283,7 +286,9 @@ class DigitalCardModel {
       name: name ?? this.name,
       jobTitle: jobTitle ?? this.jobTitle,
       company: company ?? this.company,
-      profilePhotoUrl: profilePhotoUrl ?? this.profilePhotoUrl,
+      profilePhotoUrl: clearProfilePhoto
+          ? null
+          : profilePhotoUrl ?? this.profilePhotoUrl,
       companyLogoUrl: companyLogoUrl ?? this.companyLogoUrl,
       bio: bio ?? this.bio,
       themeStyle: themeStyle ?? this.themeStyle,

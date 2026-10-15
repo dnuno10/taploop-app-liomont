@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -15,6 +16,7 @@ import '../../../core/widgets/taploop_toast.dart';
 import '../models/lead_model.dart';
 import '../models/team_member_model.dart';
 import '../widgets/team_member_filter_dropdown.dart';
+import '../../admin/widgets/leads_export_panel.dart';
 
 // ─── Simulated timeline events ────────────────────────────────────────────────
 
@@ -203,6 +205,7 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
   String? _selectedLeadId;
   final TextEditingController _searchCtrl = TextEditingController();
   String _search = '';
+  Timer? _searchDebounce;
   String _statusFilter = 'all';
   MetricsRealtimeSubscription? _metricsRealtime;
   String? _realtimeOrgId;
@@ -219,6 +222,7 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
   void dispose() {
     appState.removeListener(_onAppStateChanged);
     _metricsRealtime?.close();
+    _searchDebounce?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -258,7 +262,10 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
       return;
     }
     try {
-      final members = orgId == null
+      // Only admins can see (and filter by) other collaborators; everyone
+      // else only ever loads their own card's data.
+      final isAdmin = appState.currentUser?.isAdmin == true;
+      final members = orgId == null || !isAdmin
           ? <TeamMemberModel>[]
           : await AdminRepository.fetchTeamMembers(orgId);
       final selectedMemberId = _resolveSelectedMemberId(
@@ -329,6 +336,15 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
         .toList();
     if (cardIds.isNotEmpty) return cardIds;
     return fallbackCardId == null ? const [] : [fallbackCardId];
+  }
+
+  // Filtering rebuilds the whole leads workspace, so wait until typing
+  // pauses briefly instead of rebuilding on every keystroke.
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 180), () {
+      if (mounted) setState(() => _search = value);
+    });
   }
 
   List<LeadModel> get _leads {
@@ -414,7 +430,7 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
                     ],
                   ),
                 ),
-                if (isDesktop)
+                if (isDesktop && appState.currentUser?.isAdmin == true)
                   TeamMemberFilterDropdown(
                     members: _members,
                     selectedMemberId: _selectedMemberId,
@@ -428,7 +444,7 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
                   ),
               ],
             ),
-            if (!isDesktop) ...[
+            if (!isDesktop && appState.currentUser?.isAdmin == true) ...[
               const SizedBox(height: 16),
               TeamMemberFilterDropdown(
                 members: _members,
@@ -442,13 +458,19 @@ class _LeadIntelligenceViewState extends State<LeadIntelligenceView> {
                 },
               ),
             ],
+            if (appState.currentUser case final user?
+                when user.isAdmin && user.orgId != null) ...[
+              const SizedBox(height: 24),
+              LeadsExportPanel(orgId: user.orgId!),
+            ],
             const SizedBox(height: 24),
             _LeadCommandBar(
               searchCtrl: _searchCtrl,
               search: _search,
               statusFilter: _statusFilter,
-              onSearchChanged: (v) => setState(() => _search = v),
+              onSearchChanged: _onSearchChanged,
               onClearSearch: () {
+                _searchDebounce?.cancel();
                 _searchCtrl.clear();
                 setState(() => _search = '');
               },
