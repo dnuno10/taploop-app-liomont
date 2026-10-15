@@ -5203,41 +5203,45 @@ class _SaveButtonState extends State<_SaveButton> {
       onExit: (_) {
         if (_hovered) setState(() => _hovered = false);
       },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        decoration: BoxDecoration(
-          color: widget.saving
-              ? AppColors.success.withValues(alpha: 0.1)
-              : widget.unsaved
-              ? null
-              : context.bgSubtle,
-          gradient: widget.unsaved && !widget.saving
-              ? LinearGradient(
-                  colors: _hovered
-                      ? const [Color(0xFFFF6A2A), Color(0xFFFF9A52)]
-                      : const [Color(0xFFFF5A1F), Color(0xFFFF8A3D)],
-                  begin: Alignment.centerLeft,
-                  end: Alignment.centerRight,
-                )
-              : null,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(
-            color: widget.unsaved && !widget.saving
-                ? Colors.transparent
-                : context.borderStrongSoft,
+      // The whole pill is the hit area (opaque): with the default behavior
+      // only taps landing exactly on the label/icon glyphs registered, so
+      // it often took several clicks to save.
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: enabled ? () => widget.onSave() : null,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          decoration: BoxDecoration(
+            color: widget.saving
+                ? AppColors.success.withValues(alpha: 0.1)
+                : widget.unsaved
+                ? null
+                : context.bgSubtle,
+            gradient: widget.unsaved && !widget.saving
+                ? LinearGradient(
+                    colors: _hovered
+                        ? const [Color(0xFFFF6A2A), Color(0xFFFF9A52)]
+                        : const [Color(0xFFFF5A1F), Color(0xFFFF8A3D)],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  )
+                : null,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: widget.unsaved && !widget.saving
+                  ? Colors.transparent
+                  : context.borderStrongSoft,
+            ),
+            boxShadow: enabled && _hovered
+                ? [
+                    BoxShadow(
+                      color: AppColors.primary.withValues(alpha: 0.22),
+                      blurRadius: 16,
+                      offset: const Offset(0, 8),
+                    ),
+                  ]
+                : null,
           ),
-          boxShadow: enabled && _hovered
-              ? [
-                  BoxShadow(
-                    color: AppColors.primary.withValues(alpha: 0.22),
-                    blurRadius: 16,
-                    offset: const Offset(0, 8),
-                  ),
-                ]
-              : null,
-        ),
-        child: GestureDetector(
-          onTap: enabled ? () => widget.onSave() : null,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
             child: widget.saving
