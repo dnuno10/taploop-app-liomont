@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -671,7 +672,7 @@ class _CardPage extends StatelessWidget {
 
 // ─── Save Contact Button ─────────────────────────────────────────────────────
 
-class _SaveContactButton extends StatelessWidget {
+class _SaveContactButton extends StatefulWidget {
   final DigitalCardModel card;
   final List<ContactItemModel> contacts;
   final Color accent;
@@ -682,22 +683,92 @@ class _SaveContactButton extends StatelessWidget {
     required this.accent,
   });
 
+  @override
+  State<_SaveContactButton> createState() => _SaveContactButtonState();
+}
+
+/// Embedded vCard photo: base64 data plus its vCard TYPE (JPEG/PNG).
+typedef _VCardPhoto = ({String base64, String type});
+
+class _SaveContactButtonState extends State<_SaveContactButton> {
+  bool _preparing = false;
+
+  /// Started as soon as the button is shown, so tapping it doesn't wait on
+  /// the network: mobile Safari can block a download that starts too long
+  /// after the tap.
+  Future<_VCardPhoto?>? _photo;
+  String? _photoUrl;
+
+  DigitalCardModel get card => widget.card;
+
+  @override
+  void initState() {
+    super.initState();
+    _prefetchPhoto();
+  }
+
+  @override
+  void didUpdateWidget(covariant _SaveContactButton oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _prefetchPhoto();
+  }
+
+  void _prefetchPhoto() {
+    final url = card.profilePhotoUrl?.trim();
+    if (url == _photoUrl && _photo != null) return;
+    _photoUrl = url;
+    _photo = _loadPhoto(url);
+  }
+
   Future<void> _downloadVCard() async {
-    final vcard = _buildVCard(card, contacts);
-    final fileName = '${_safeFileName(card.name)}.vcf';
-    final downloaded = await downloadVCardFile(fileName, vcard);
-    if (downloaded) {
-      await AnalyticsRepository.recordInteraction(
-        cardId: card.id,
-        source: 'downloaded_contact',
-      );
+    if (_preparing) return;
+    setState(() => _preparing = true);
+    try {
+      // Exactly the photo this public profile is showing (same card and
+      // URL as the avatar above the button).
+      _prefetchPhoto();
+      final photo = await _photo;
+      final vcard = _buildVCard(card, widget.contacts, photo: photo);
+      final fileName = '${_safeFileName(card.name)}.vcf';
+      final downloaded = await downloadVCardFile(fileName, vcard);
+      if (downloaded) {
+        await AnalyticsRepository.recordInteraction(
+          cardId: card.id,
+          source: 'downloaded_contact',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _preparing = false);
     }
+  }
+
+  /// Downloads the profile photo for embedding. Null (contact saved without
+  /// photo) if there is none, it fails, takes too long, or isn't JPEG/PNG —
+  /// the formats phone contact apps accept.
+  static Future<_VCardPhoto?> _loadPhoto(String? url) async {
+    final photoUrl = url?.trim();
+    if (photoUrl == null || photoUrl.isEmpty) return null;
+    final bytes = await fetchVCardPhotoBytes(photoUrl);
+    if (bytes == null || bytes.length < 4) return null;
+    final String type;
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+      type = 'JPEG';
+    } else if (bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      type = 'PNG';
+    } else {
+      return null;
+    }
+    return (base64: base64Encode(bytes), type: type);
   }
 
   static String _buildVCard(
     DigitalCardModel card,
-    List<ContactItemModel> contacts,
-  ) {
+    List<ContactItemModel> contacts, {
+    _VCardPhoto? photo,
+  }) {
     final lines = <String>[
       'BEGIN:VCARD',
       'VERSION:3.0',
@@ -721,9 +792,10 @@ class _SaveContactButton extends StatelessWidget {
     if (card.bio?.trim().isNotEmpty == true) {
       lines.add('NOTE:${_escapeVCard(card.bio!.trim())}');
     }
-    if (card.profilePhotoUrl?.trim().isNotEmpty == true) {
+    if (photo != null) {
+      // Embedded image: phone contact apps ignore PHOTO;VALUE=URI links.
       lines.add(
-        'PHOTO;VALUE=URI:${_escapeVCard(card.profilePhotoUrl!.trim())}',
+        _foldVCardLine('PHOTO;ENCODING=b;TYPE=${photo.type}:${photo.base64}'),
       );
     }
     if (card.companyLogoUrl?.trim().isNotEmpty == true) {
@@ -762,6 +834,21 @@ class _SaveContactButton extends StatelessWidget {
     return '${lines.join('\r\n')}\r\n';
   }
 
+  /// Folds a long line per the vCard spec: at most 75 characters per line,
+  /// continuation lines start with a single space.
+  static String _foldVCardLine(String line) {
+    const limit = 75;
+    if (line.length <= limit) return line;
+    final buffer = StringBuffer(line.substring(0, limit));
+    for (var i = limit; i < line.length; i += limit - 1) {
+      final end = (i + limit - 1).clamp(0, line.length);
+      buffer
+        ..write('\r\n ')
+        ..write(line.substring(i, end));
+    }
+    return buffer.toString();
+  }
+
   static String _escapeVCard(String value) {
     return value
         .replaceAll('\\', r'\\')
@@ -790,11 +877,24 @@ class _SaveContactButton extends StatelessWidget {
           child: SizedBox(
             width: double.infinity,
             child: FilledButton.icon(
-              onPressed: _downloadVCard,
-              icon: const Icon(Icons.person_add_alt_1_outlined, size: 20),
-              label: const Text('Guardar contacto'),
+              onPressed: _preparing ? null : _downloadVCard,
+              icon: _preparing
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.person_add_alt_1_outlined, size: 20),
+              label: Text(
+                _preparing ? 'Preparando contacto…' : 'Guardar contacto',
+              ),
               style: FilledButton.styleFrom(
-                backgroundColor: accent,
+                backgroundColor: widget.accent,
+                disabledBackgroundColor: widget.accent.withValues(alpha: 0.75),
+                disabledForegroundColor: Colors.white,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(vertical: 18),
                 shape: RoundedRectangleBorder(
