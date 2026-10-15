@@ -398,15 +398,33 @@ class CardRepository {
   /// `public_slug` has no DB-level unique constraint, so callers MUST check
   /// this before writing a user-chosen slug to avoid two cards silently
   /// sharing the same public link.
+  ///
+  /// Checks every card of every org (public links resolve globally) through
+  /// `liomont_is_slug_available`, case-insensitively. Falls back to a
+  /// case-insensitive table query, limited by RLS, if the RPC is missing.
   static Future<bool> isSlugAvailable(
     String slug, {
     required String excludingCardId,
   }) async {
+    final normalized = slug.trim().toLowerCase();
+    try {
+      final result = await _db.rpc(
+        'liomont_is_slug_available',
+        params: {
+          'p_slug': normalized,
+          'p_card_id': excludingCardId.isEmpty ? null : excludingCardId,
+        },
+      );
+      if (result is bool) return result;
+    } catch (_) {
+      // RPC not installed: fall back to the RLS-limited query below.
+    }
+    // Slugs only contain [a-z0-9-], so ilike has no wildcard surprises.
     final rows = await _db
         .from('digital_cards')
         .select('id')
-        .eq('public_slug', slug)
-        .limit(2);
+        .ilike('public_slug', normalized)
+        .limit(5);
     final matches = (rows as List).cast<Map<String, dynamic>>();
     return matches.every((row) => row['id'] == excludingCardId);
   }
@@ -437,10 +455,20 @@ class CardRepository {
     return '$base-${cardId.substring(0, 6)}';
   }
 
+  /// Writes a new public slug. Re-validates right before writing (another
+  /// profile may have taken it since the dialog checked) and throws
+  /// [SlugTakenException] instead of creating a duplicate public link.
   static Future<void> updateSlug({
     required String cardId,
     required String slug,
   }) async {
+    slug = slug.trim().toLowerCase();
+    if (!slugPattern.hasMatch(slug)) {
+      throw ArgumentError.value(slug, 'slug', 'Formato de enlace inválido');
+    }
+    if (!await isSlugAvailable(slug, excludingCardId: cardId)) {
+      throw SlugTakenException(slug);
+    }
     if (LinkedAdminGateway.handlesCard(cardId)) {
       await LinkedAdminGateway.updateCard(cardId, {'public_slug': slug});
       return;
@@ -1243,4 +1271,16 @@ class CardRepository {
             message.contains('does not exist') ||
             message.contains('Could not find the table'));
   }
+}
+
+/// The public slug is already used by another digital profile.
+class SlugTakenException implements Exception {
+  final String slug;
+
+  const SlugTakenException(this.slug);
+
+  // Contains "slug_taken", like the lp_admin RPC error, so callers can
+  // handle both the same way.
+  @override
+  String toString() => 'slug_taken: $slug';
 }

@@ -125,7 +125,8 @@ BEGIN
 
   IF p_payload ? 'public_slug' AND EXISTS (
     SELECT 1 FROM public.digital_cards
-    WHERE public_slug = p_payload->>'public_slug' AND id <> p_card_id
+    WHERE lower(btrim(public_slug)) = lower(btrim(p_payload->>'public_slug'))
+      AND id <> p_card_id
   ) THEN
     RAISE EXCEPTION 'lp_admin_slug_taken' USING ERRCODE = '23505';
   END IF;

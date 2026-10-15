@@ -235,11 +235,13 @@ class _ShareCardViewState extends State<ShareCardView> {
         'Enlace actualizado correctamente.',
         TapLoopToastType.success,
       );
-    } catch (_) {
+    } catch (error) {
       if (!mounted) return;
       TapLoopToast.show(
         context,
-        'No se pudo actualizar el enlace. Intenta de nuevo.',
+        error.toString().contains('slug_taken')
+            ? 'Ese enlace ya está en uso por otro perfil. Elige otro.'
+            : 'No se pudo actualizar el enlace. Intenta de nuevo.',
         TapLoopToastType.error,
       );
     }
